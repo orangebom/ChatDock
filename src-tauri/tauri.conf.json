@@ -13,9 +13,7 @@
         "label": "main",
         "title": "ChatDock",
         "width": 1600,
-        "height": 980,
-        "minWidth": 1200,
-        "minHeight": 820
+        "height": 980
       }
     ],
     "security": {
