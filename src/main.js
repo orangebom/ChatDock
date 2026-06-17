@@ -1,4 +1,13 @@
 import Sortable from "./vendor/sortable.esm.js";
+import { handleCloseRequest, hasBlockingOverlay } from "./close-confirm.js";
+import {
+  applyAvailabilityResults,
+  clearSelectionState,
+  getLabelsToProbe,
+  getSiteAvailability as readSiteAvailability,
+  isSiteUnavailable as readSiteUnavailable,
+  toggleSiteSelection,
+} from "./ui-state.js";
 
 const { core, dpi, webview, window: tauriWindow, event: tauriEvent } = window.__TAURI__;
 const { invoke } = core;
@@ -24,6 +33,7 @@ const PANEL_TOPBAR_HEIGHT = 34;
 const PANEL_TOOLBAR_ROUTE = "/panel-toolbar.html";
 const PROMPT_MIN_HEIGHT = 36;
 const PROMPT_MAX_HEIGHT = 116;
+const SITE_PROBE_TIMEOUT_MS = 7000;
 
 const TEXT = {
   emptyTitle: "\u5c1a\u672a\u9009\u62e9 AI",
@@ -73,6 +83,8 @@ const ONBOARDING_STEPS = [
 const state = {
   sites: [],
   siteMap: new Map(),
+  siteAvailability: new Map(),
+  pendingSiteAvailability: new Set(),
   webviews: new Map(),
   pendingWebviews: new Map(),
   toolbarWebviews: new Map(),
@@ -89,6 +101,10 @@ const state = {
   resizeObserver: null,
   compactBarObserver: null,
   sortables: [],
+  closeConfirm: {
+    open: false,
+    resolver: null,
+  },
   onboarding: {
     open: false,
     completed: false,
@@ -254,6 +270,14 @@ function getOrderedSites() {
   return siteOrder.map((label) => getSiteMeta(label)).filter(Boolean);
 }
 
+function getSiteAvailability(label) {
+  return readSiteAvailability(state.siteAvailability, label);
+}
+
+function isSiteUnavailable(label) {
+  return readSiteUnavailable(state.siteAvailability, label);
+}
+
 function getVisibleManagedSites() {
   const visibleLabels = new Set(state.workspace.visibleSiteLabels);
   return getOrderedSites().filter((site) => visibleLabels.has(site.label));
@@ -346,7 +370,11 @@ function persistOnboardingCompleted() {
 }
 
 function isAnyOverlayOpen() {
-  return isSiteManagerOpen() || isOnboardingOpen();
+  return hasBlockingOverlay({
+    siteManagerOpen: isSiteManagerOpen(),
+    closeConfirmOpen: isCloseConfirmOpen(),
+    onboardingOpen: isOnboardingOpen(),
+  });
 }
 
 function isOnboardingOpen() {
@@ -609,6 +637,79 @@ async function renderAppVersion() {
   }
 }
 
+function ensureClearSelectionButton() {
+  const compactSide = document.querySelector(".compact-side");
+  const manageButton = document.querySelector("#manage-sites");
+  if (!compactSide || !manageButton) {
+    return null;
+  }
+
+  let button = document.querySelector("#clear-selection");
+  if (!button) {
+    button = document.createElement("button");
+    button.type = "button";
+    button.id = "clear-selection";
+    button.className = "ghost-button compact-manage";
+    button.textContent = "清空选择";
+    button.addEventListener("click", async () => {
+      await clearSelectedSites();
+    });
+    compactSide.insertBefore(button, manageButton);
+  }
+
+  return button;
+}
+
+function restoreTextButtons() {
+  const reloadButton = document.querySelector("#reload");
+  const relayoutButton = document.querySelector("#relayout");
+  const clearButton = ensureClearSelectionButton();
+  const manageButton = document.querySelector("#manage-sites");
+
+  if (reloadButton) {
+    reloadButton.classList.remove("icon-button");
+    delete reloadButton.dataset.iconOnly;
+    reloadButton.textContent = "刷新";
+    reloadButton.title = "刷新所有已选 AI";
+    reloadButton.setAttribute("aria-label", "刷新所有已选 AI");
+  }
+
+  if (relayoutButton) {
+    relayoutButton.classList.remove("icon-button");
+    delete relayoutButton.dataset.iconOnly;
+    relayoutButton.textContent = "适配";
+    relayoutButton.title = "刷新当前页面布局";
+    relayoutButton.setAttribute("aria-label", "刷新当前页面布局");
+  }
+
+  if (clearButton) {
+    clearButton.classList.remove("icon-button");
+    delete clearButton.dataset.iconOnly;
+    clearButton.textContent = "清空选择";
+  }
+
+  if (manageButton) {
+    manageButton.classList.remove("icon-button");
+    delete manageButton.dataset.iconOnly;
+    manageButton.textContent = "编辑 AI";
+    manageButton.title = "编辑 AI";
+    manageButton.setAttribute("aria-label", "编辑 AI");
+  }
+}
+
+function syncClearSelectionButton() {
+  const button = ensureClearSelectionButton();
+  if (!button) {
+    return;
+  }
+
+  const selectedCount = state.workspace?.selectedSiteLabels.length || 0;
+  button.disabled = selectedCount === 0;
+  const hint = selectedCount === 0 ? "当前没有已选 AI" : "清空当前已选 AI";
+  button.title = hint;
+  button.setAttribute("aria-label", hint);
+}
+
 function setStatus(message, level = "muted") {
   const status = document.querySelector("#status");
   if (!status) {
@@ -699,12 +800,32 @@ function wireSystemThemeWatcher() {
 
 function createIcon(kind) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 20 20");
+  svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
 
   const segments =
     kind === "reload"
-      ? ["M16.1 10a6.1 6.1 0 1 1-1.79-4.31", "M16.1 4.9v3.7h-3.7"]
+      ? ["M20 11a8 8 0 1 1-2.34-5.66", "M20 4v6h-6"]
+      : kind === "layout"
+        ? [
+            "M12 3v18",
+            "M3 12h18",
+            "M3 7h18",
+            "M3 17h18",
+          ]
+        : kind === "clear"
+          ? [
+              "M4 7h16",
+              "M9 7V5.5h6V7",
+              "M7 7l1 12h8l1-12",
+              "M10 11v5",
+              "M14 11v5",
+            ]
+          : kind === "edit"
+            ? [
+                "M4 20l4.2-1 9.3-9.3-3.2-3.2L5 15.8 4 20",
+                "M13.6 5.4l3.2 3.2",
+              ]
       : kind === "restore"
         ? [
             "M7 4.8H4.8V7",
@@ -738,6 +859,44 @@ function createStatusDot(accentColor) {
   dot.className = "status-dot";
   dot.style.background = accentColor;
   return dot;
+}
+
+async function ensureSiteAvailability(targetLabels = state.workspace?.visibleSiteLabels || []) {
+  const labelsToProbe = getLabelsToProbe(
+    targetLabels,
+    state.siteMap,
+    state.siteAvailability,
+    state.pendingSiteAvailability,
+  );
+
+  if (!labelsToProbe.length) {
+    return;
+  }
+
+  labelsToProbe.forEach((label) => {
+    state.pendingSiteAvailability.add(label);
+  });
+  renderGlobalTargets();
+
+  try {
+    const results = await invoke("probe_site_availability", {
+      targets: labelsToProbe,
+      timeoutMs: SITE_PROBE_TIMEOUT_MS,
+    });
+
+    applyAvailabilityResults(labelsToProbe, results).forEach((result, label) => {
+      state.siteAvailability.set(label, result);
+    });
+  } catch (_error) {
+    applyAvailabilityResults(labelsToProbe, [], "\u4e0d\u53ef\u8bbf\u95ee").forEach((result, label) => {
+      state.siteAvailability.set(label, result);
+    });
+  } finally {
+    labelsToProbe.forEach((label) => {
+      state.pendingSiteAvailability.delete(label);
+    });
+    renderGlobalTargets();
+  }
 }
 
 function createDragHandle() {
@@ -1307,13 +1466,58 @@ function renderEmptyState() {
   const card = document.createElement("div");
   card.className = "layout-empty-card";
 
+  const orbit = document.createElement("div");
+  orbit.className = "layout-empty-orbit";
+
+  const orbitCore = document.createElement("div");
+  orbitCore.className = "layout-empty-core";
+  orbitCore.textContent = "AI";
+
+  const orbitRing = document.createElement("div");
+  orbitRing.className = "layout-empty-ring";
+
+  for (let index = 0; index < 4; index += 1) {
+    const node = document.createElement("span");
+    node.className = `layout-empty-node node-${index + 1}`;
+    orbit.appendChild(node);
+  }
+
+  orbit.append(orbitRing, orbitCore);
+
   const title = document.createElement("h2");
   title.textContent = TEXT.emptyTitle;
 
   const message = document.createElement("p");
   message.textContent = TEXT.emptyMessage;
 
-  card.append(title, message);
+  const steps = document.createElement("div");
+  steps.className = "layout-empty-steps";
+
+  [
+    "勾选你想观察的 AI",
+    "支持同时展示最多 4 个",
+    "超过 4 个会自动分页",
+  ].forEach((label, index) => {
+    const item = document.createElement("div");
+    item.className = "layout-empty-step";
+
+    const badge = document.createElement("span");
+    badge.className = "layout-empty-step-index";
+    badge.textContent = String(index + 1);
+
+    const text = document.createElement("span");
+    text.className = "layout-empty-step-text";
+    text.textContent = label;
+
+    item.append(badge, text);
+    steps.appendChild(item);
+  });
+
+  const hint = document.createElement("div");
+  hint.className = "layout-empty-hint";
+  hint.textContent = "从底部开始组装你的 AI 工作台";
+
+  card.append(orbit, title, message, steps, hint);
   container.append(card);
 }
 
@@ -1480,9 +1684,15 @@ function renderGlobalTargets() {
   for (const site of getVisibleManagedSites()) {
     const isSelected = selected.has(site.label);
     const selectedIndex = state.workspace.selectedSiteLabels.indexOf(site.label);
+    const availability = getSiteAvailability(site.label);
+    const isUnavailable = isSiteUnavailable(site.label);
     const pill = document.createElement("label");
-    pill.className = `target-pill${isSelected ? " active" : ""}`;
+    pill.className = `target-pill${isSelected ? " active" : ""}${isUnavailable ? " unavailable" : ""}`;
     pill.dataset.siteLabel = site.label;
+    if (isUnavailable) {
+      pill.title = availability?.message || "不可访问";
+      pill.setAttribute("aria-label", `${site.title}，${availability?.message || "不可访问"}`);
+    }
 
     const input = document.createElement("input");
     input.type = "checkbox";
@@ -1552,6 +1762,7 @@ async function handlePanelAction(action, target) {
 
 function renderWorkspace() {
   persistWorkspace();
+  syncClearSelectionButton();
   renderPageTabs();
   renderGlobalTargets();
   renderSiteManager();
@@ -1559,26 +1770,29 @@ function renderWorkspace() {
   syncCompactBarHeight();
   syncPanelShellStates();
   applyLayout();
+  void ensureSiteAvailability(state.workspace.visibleSiteLabels);
 }
 
 function setSiteSelected(label, selected) {
-  if (!state.workspace.visibleSiteLabels.includes(label)) {
+  const nextState = toggleSiteSelection({
+    label,
+    selected,
+    visibleSiteLabels: state.workspace.visibleSiteLabels,
+    selectedSiteLabels: state.workspace.selectedSiteLabels,
+    maximizedLabel: state.maximizedLabel,
+    activePageIndex: state.workspace.activePageIndex,
+    normalizePageLayouts,
+    pageLayouts: state.workspace.pageLayouts,
+  });
+
+  if (!nextState) {
     return;
   }
-  const current = state.workspace.selectedSiteLabels.filter((item) => item !== label);
-  if (selected) {
-    current.push(label);
-  }
 
-  state.workspace.selectedSiteLabels = current;
-  if (!selected && state.maximizedLabel === label) {
-    state.maximizedLabel = null;
-  }
-  const pageCount = getPageCount();
-  state.workspace.pageLayouts = normalizePageLayouts(state.workspace.pageLayouts, pageCount);
-  state.workspace.activePageIndex = selected
-    ? Math.floor((current.length - 1) / MAX_SITES_PER_PAGE)
-    : clamp(state.workspace.activePageIndex, 0, pageCount - 1);
+  state.workspace.selectedSiteLabels = nextState.selectedSiteLabels;
+  state.maximizedLabel = nextState.maximizedLabel;
+  state.workspace.activePageIndex = nextState.activePageIndex;
+  state.workspace.pageLayouts = nextState.pageLayouts;
   persistWorkspace();
 }
 
@@ -1637,6 +1851,11 @@ function isSiteManagerOpen() {
   return Boolean(modal && !modal.hidden);
 }
 
+function isCloseConfirmOpen() {
+  const modal = document.querySelector("#close-confirm");
+  return Boolean(modal && !modal.hidden);
+}
+
 async function openSiteManager() {
   const modal = document.querySelector("#site-manager");
   if (!modal) {
@@ -1655,6 +1874,57 @@ async function closeSiteManager() {
     return;
   }
   modal.hidden = true;
+  await refreshLayout();
+}
+
+async function showCloseConfirm() {
+  const modal = document.querySelector("#close-confirm");
+  if (!modal) {
+    return true;
+  }
+
+  if (state.closeConfirm.open) {
+    return new Promise((resolve) => {
+      const previousResolver = state.closeConfirm.resolver;
+      state.closeConfirm.resolver = (result) => {
+        previousResolver?.(result);
+        resolve(result);
+      };
+    });
+  }
+
+  if (isSiteManagerOpen()) {
+    await closeSiteManager();
+  }
+
+  if (isOnboardingOpen()) {
+    await closeOnboarding(true);
+  }
+
+  state.closeConfirm.open = true;
+  modal.hidden = false;
+
+  const acceptButton = document.querySelector("#accept-close-confirm");
+  window.requestAnimationFrame(() => {
+    acceptButton?.focus();
+  });
+
+  return new Promise((resolve) => {
+    state.closeConfirm.resolver = resolve;
+  });
+}
+
+async function resolveCloseConfirm(accepted) {
+  const modal = document.querySelector("#close-confirm");
+  if (!modal || !state.closeConfirm.open) {
+    return;
+  }
+
+  modal.hidden = true;
+  state.closeConfirm.open = false;
+  const resolver = state.closeConfirm.resolver;
+  state.closeConfirm.resolver = null;
+  resolver?.(accepted);
   await refreshLayout();
 }
 
@@ -1690,7 +1960,7 @@ function createManagerItem(site, visible) {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "mini-button";
-    remove.textContent = "\u79fb\u9664";
+    remove.textContent = "移除";
     remove.addEventListener("click", async () => {
       removeVisibleSite(site.label);
       renderWorkspace();
@@ -1701,7 +1971,7 @@ function createManagerItem(site, visible) {
     const add = document.createElement("button");
     add.type = "button";
     add.className = "mini-button";
-    add.textContent = "\u6dfb\u52a0";
+    add.textContent = "添加";
     add.addEventListener("click", async () => {
       addVisibleSite(site.label);
       renderWorkspace();
@@ -1858,17 +2128,17 @@ async function sendPrompt() {
   const promptField = document.querySelector("#prompt");
   const prompt = promptField.value.trim();
   if (!prompt) {
-    setStatus("\u53d1\u9001\u524d\u8bf7\u5148\u8f93\u5165\u95ee\u9898\u3002", "warn");
+    setStatus("发送前请先输入问题。", "warn");
     return;
   }
 
   const targets = [...state.workspace.selectedSiteLabels];
   if (!targets.length) {
-    setStatus("\u8bf7\u5148\u9009\u62e9\u81f3\u5c11\u4e00\u4e2a AI\u3002", "warn");
+    setStatus("请先选择至少一个 AI。", "warn");
     return;
   }
 
-  setStatus(`\u6b63\u5728\u5411 ${targets.length} \u4e2a AI \u53d1\u9001\u95ee\u9898...`, "working");
+  setStatus(`正在向 ${targets.length} 个 AI 发送问题...`, "working");
   await ensureTargetsReady(targets, false);
   await sleep(380);
   try {
@@ -1876,12 +2146,12 @@ async function sendPrompt() {
     renderResults(results);
     const okCount = results.filter((item) => item.ok).length;
     setStatus(
-      `\u53d1\u9001\u5b8c\u6210\uff1a${okCount}/${results.length} \u6210\u529f\u3002`,
+      `发送完成：${okCount}/${results.length} 成功。`,
       okCount === results.length ? "ok" : "warn",
     );
   } catch (error) {
     console.error(error);
-    setStatus(`\u53d1\u9001\u5931\u8d25\uff1a${error}`, "fail");
+    setStatus(`发送失败：${error}`, "fail");
   } finally {
     promptField.value = "";
     autosizePrompt();
@@ -1892,16 +2162,16 @@ async function sendPrompt() {
 async function reloadAll() {
   const targets = [...state.workspace.selectedSiteLabels];
   if (!targets.length) {
-    setStatus("\u8bf7\u5148\u9009\u62e9\u81f3\u5c11\u4e00\u4e2a AI\u3002", "warn");
+    setStatus("请先选择至少一个 AI。", "warn");
     return;
   }
 
-  setStatus(`\u6b63\u5728\u5237\u65b0 ${targets.length} \u4e2a AI...`, "working");
+  setStatus(`正在刷新 ${targets.length} 个 AI...`, "working");
   const results = await reloadTargets(targets);
   renderResults(results);
   const okCount = results.filter((item) => item.ok).length;
   setStatus(
-    `\u5237\u65b0\u5b8c\u6210\uff1a${okCount}/${results.length} \u6210\u529f\u3002`,
+    `刷新完成：${okCount}/${results.length} 成功。`,
     okCount === results.length ? "ok" : "warn",
   );
 }
@@ -1958,6 +2228,34 @@ async function fetchSites() {
   const sites = await invoke("list_sites");
   state.sites = sites;
   state.siteMap = new Map(sites.map((site) => [site.label, site]));
+}
+
+function wireCloseConfirmation() {
+  return appWindow.onCloseRequested(async (event) => {
+    await handleCloseRequest({
+      event,
+      showCloseConfirm,
+      destroyWindow: () => appWindow.destroy(),
+      setStatus,
+      onError: console.error,
+    });
+  });
+}
+
+async function clearSelectedSites() {
+  if (!state.workspace?.selectedSiteLabels.length) {
+    return;
+  }
+
+  const nextState = clearSelectionState(state.workspace.pageLayouts, normalizePageLayouts);
+  state.workspace.selectedSiteLabels = nextState.selectedSiteLabels;
+  state.workspace.activePageIndex = nextState.activePageIndex;
+  state.workspace.pageLayouts = nextState.pageLayouts;
+  state.maximizedLabel = nextState.maximizedLabel;
+  persistWorkspace();
+  renderWorkspace();
+  await refreshLayout();
+  setStatus("已清空当前选择。", "ok");
 }
 
 async function boot() {
@@ -2023,6 +2321,17 @@ async function boot() {
       await closeSiteManager();
     }
   });
+  document.querySelector("#cancel-close-confirm").addEventListener("click", async () => {
+    await resolveCloseConfirm(false);
+  });
+  document.querySelector("#accept-close-confirm").addEventListener("click", async () => {
+    await resolveCloseConfirm(true);
+  });
+  document.querySelector("#close-confirm").addEventListener("click", async (event) => {
+    if (event.target?.dataset?.closeConfirmBackdrop === "true") {
+      await resolveCloseConfirm(false);
+    }
+  });
   document.querySelector("#tour-prev").addEventListener("click", async () => {
     await stepOnboarding(-1);
   });
@@ -2037,6 +2346,11 @@ async function boot() {
     await closeOnboarding(true);
   });
   window.addEventListener("keydown", async (event) => {
+    if (event.key === "Escape" && isCloseConfirmOpen()) {
+      event.preventDefault();
+      await resolveCloseConfirm(false);
+      return;
+    }
     if (event.key === "Escape" && isSiteManagerOpen()) {
       await closeSiteManager();
     }
@@ -2058,8 +2372,11 @@ async function boot() {
   });
 
   wireThemeToggle();
+  restoreTextButtons();
+  syncClearSelectionButton();
   wireLayoutDragging();
   wireResponsiveRelayout();
+  await wireCloseConfirmation();
 
   await appWindow.onResized(() => {
     scheduleLayoutRefresh("window-state", [0, 120, 260, 460, 720]);

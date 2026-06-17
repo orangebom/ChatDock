@@ -1,5 +1,10 @@
+mod site_probe;
+
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
+use std::time::Duration;
+
+use site_probe::probe_sites;
 
 #[derive(Clone, Copy)]
 struct SiteConfig {
@@ -288,6 +293,16 @@ fn reload_webviews(app: AppHandle<tauri::Wry>, targets: Vec<String>) -> Vec<Comm
         .iter()
         .map(|site| run_for_webview(&app, site.label, "window.location.reload();"))
         .collect()
+}
+
+#[tauri::command]
+async fn probe_site_availability(
+    targets: Vec<String>,
+    timeout_ms: Option<u64>,
+) -> Vec<site_probe::SiteAvailabilityResult> {
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(7000));
+    let resolved = resolve_targets(targets);
+    probe_sites(resolved.into_iter().map(|site| (site.label, site.url)), timeout).await
 }
 
 fn resolve_targets(targets: Vec<String>) -> Vec<&'static SiteConfig> {
@@ -812,7 +827,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_sites,
             broadcast_prompt,
-            reload_webviews
+            reload_webviews,
+            probe_site_availability
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
