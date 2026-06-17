@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>面板工具栏</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: rgba(17, 25, 40, 0.96);
+        --border: rgba(128, 145, 181, 0.22);
+        --text: #edf3ff;
+        --text-dim: #bfd0ea;
+        --hover: rgba(173, 198, 255, 0.08);
+        --active: rgba(173, 198, 255, 0.14);
+        --danger-hover: rgba(229, 81, 81, 0.18);
+        --danger-text: #fff3f2;
+      }
+
+      :root[data-theme="light"] {
+        color-scheme: light;
+        --bg: rgba(255, 255, 255, 0.96);
+        --border: rgba(110, 126, 167, 0.2);
+        --text: #15233d;
+        --text-dim: #47607f;
+        --hover: rgba(77, 142, 255, 0.1);
+        --active: rgba(77, 142, 255, 0.14);
+        --danger-hover: rgba(229, 81, 81, 0.14);
+        --danger-text: #9b1c1f;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: "Inter", "Segoe UI", sans-serif;
+      }
+
+      body {
+        border-bottom: 1px solid var(--border);
+        background: var(--bg);
+        backdrop-filter: blur(10px);
+      }
+
+      .toolbar {
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 0 10px;
+      }
+
+      .title {
+        min-width: 0;
+        flex: 1 1 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .title-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        flex: 0 0 auto;
+      }
+
+      .tools {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .tool {
+        width: 28px;
+        height: 28px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--text-dim);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+      }
+
+      .tool:hover {
+        background: var(--hover);
+        color: var(--text);
+      }
+
+      .tool:active {
+        transform: translateY(0.5px);
+      }
+
+      .tool.active {
+        background: var(--active);
+        color: var(--text);
+      }
+
+      .tool[data-action="close"]:hover {
+        background: var(--danger-hover);
+        color: var(--danger-text);
+      }
+
+      svg {
+        width: 15px;
+        height: 15px;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <div class="title">
+        <span id="dot" class="dot"></span>
+        <span id="title" class="title-text"></span>
+      </div>
+      <div class="tools">
+        <button
+          id="reload"
+          class="tool"
+          data-action="reload"
+          type="button"
+          aria-label="刷新"
+          title="刷新"
+        ></button>
+        <button
+          id="maximize"
+          class="tool"
+          data-action="maximize"
+          type="button"
+          aria-label="最大化"
+          title="最大化"
+        ></button>
+        <button
+          id="close"
+          class="tool"
+          data-action="close"
+          type="button"
+          aria-label="关闭"
+          title="关闭"
+        ></button>
+      </div>
+    </div>
+
+    <script type="module">
+      const { event } = window.__TAURI__;
+      const params = new URLSearchParams(window.location.search);
+      const site = params.get("site") || "";
+      const initialTitle = params.get("title") || "";
+      const initialAccent = params.get("accent") || "#7da8ff";
+
+      const titleNode = document.querySelector("#title");
+      const dotNode = document.querySelector("#dot");
+      const maximizeButton = document.querySelector("#maximize");
+
+      function createIcon(kind) {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 20 20");
+        svg.setAttribute("aria-hidden", "true");
+
+        const segments =
+          kind === "reload"
+            ? ["M16.1 10a6.1 6.1 0 1 1-1.79-4.31", "M16.1 4.9v3.7h-3.7"]
+            : kind === "restore"
+              ? [
+                  "M7 4.8H4.8V7",
+                  "M13 4.8h2.2V7",
+                  "M15.2 13v2.2H13",
+                  "M7 15.2H4.8V13",
+                  "M8.2 8.2h3.6v3.6H8.2z",
+                ]
+              : kind === "maximize"
+                ? ["M7 4.8H4.8V7", "M13 4.8h2.2V7", "M15.2 13v2.2H13", "M7 15.2H4.8V13"]
+                : ["M5.2 5.2l9.6 9.6", "M14.8 5.2l-9.6 9.6"];
+
+        for (const segment of segments) {
+          const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          path.setAttribute("d", segment);
+          svg.appendChild(path);
+        }
+        return svg;
+      }
+
+      function applyState(payload = {}) {
+        const title = payload.title || initialTitle;
+        const accent = payload.accent || initialAccent;
+        const theme = payload.theme === "light" ? "light" : "dark";
+        const maximized = Boolean(payload.maximized);
+
+        document.documentElement.dataset.theme = theme;
+        titleNode.textContent = title;
+        dotNode.style.background = accent;
+
+        maximizeButton.classList.toggle("active", maximized);
+        maximizeButton.replaceChildren(createIcon(maximized ? "restore" : "maximize"));
+        const maximizeLabel = maximized ? "还原" : "最大化";
+        maximizeButton.setAttribute("aria-label", maximizeLabel);
+        maximizeButton.setAttribute("title", maximizeLabel);
+      }
+
+      document.querySelector("#reload").append(createIcon("reload"));
+      document.querySelector("#close").append(createIcon("close"));
+      applyState();
+
+      for (const button of document.querySelectorAll(".tool")) {
+        button.addEventListener("click", async () => {
+          await event.emit("panel-toolbar-action", {
+            site,
+            action: button.dataset.action,
+          });
+        });
+      }
+
+      await event.listen("panel-toolbar-state", ({ payload }) => {
+        if (!payload || payload.site !== site) {
+          return;
+        }
+        applyState(payload);
+      });
+    </script>
+  </body>
+</html>

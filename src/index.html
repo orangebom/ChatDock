@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ChatDock</title>
+    <script>
+      (() => {
+        const key = "ai-compare-theme";
+        const stored = window.localStorage.getItem(key);
+        const themeMode =
+          stored === "light" || stored === "dark" || stored === "system"
+            ? stored
+            : "system";
+        const resolvedTheme =
+          themeMode === "system"
+            ? window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark"
+            : themeMode;
+        document.documentElement.dataset.theme = resolvedTheme;
+        document.documentElement.dataset.themeMode = themeMode;
+        document.documentElement.style.colorScheme = resolvedTheme;
+      })();
+    </script>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="/main.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div id="page-tabs" class="page-tabs"></div>
+        <div class="topbar-actions">
+          <div id="app-version" class="app-version topbar-version" aria-label="软件版本">--</div>
+          <button type="button" id="reload" class="ghost-button" title="刷新所有已选 AI">刷新</button>
+          <button type="button" id="relayout" class="ghost-button" title="刷新当前页面布局">适配</button>
+          <button
+            type="button"
+            id="theme-toggle"
+            class="ghost-button theme-toggle"
+            aria-label="切换到亮色主题"
+            title="切换到亮色主题"
+          >
+            <span class="theme-indicator" aria-hidden="true"></span>
+            <span id="theme-toggle-label">暗色</span>
+          </button>
+        </div>
+      </header>
+
+      <section class="grid-preview" aria-hidden="true">
+        <div id="layout-empty" class="layout-empty" hidden></div>
+        <div id="panel-layer" class="panel-layer"></div>
+        <div id="layout-handles" class="layout-handles" aria-hidden="true"></div>
+      </section>
+
+      <section class="compact-bar">
+        <div class="compact-topline">
+          <div id="global-targets" class="compact-targets"></div>
+          <div class="compact-side">
+            <button type="button" id="manage-sites" class="ghost-button compact-manage">编辑 AI</button>
+          </div>
+        </div>
+
+        <form id="prompt-form" class="compact-form">
+          <textarea
+            id="prompt"
+            rows="1"
+            placeholder="向已选 AI 同时发送问题..."
+          ></textarea>
+          <button type="submit" class="send-button compact-send" aria-label="发送问题">&gt;</button>
+        </form>
+      </section>
+
+      <div id="site-manager" class="modal-shell" hidden>
+        <div class="modal-backdrop" data-close-site-manager="true"></div>
+        <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="site-manager-title">
+          <header class="modal-header">
+            <div>
+              <h2 id="site-manager-title">编辑 AI</h2>
+              <p>管理底部选择栏中显示的 AI，并通过拖拽调整它们的顺序。</p>
+            </div>
+            <button type="button" id="close-site-manager" class="ghost-button modal-close">关闭</button>
+          </header>
+
+          <div class="modal-body">
+            <section class="manager-section">
+              <div class="manager-heading">
+                <h3>当前显示</h3>
+                <span id="visible-sites-count" class="manager-count"></span>
+              </div>
+              <div id="visible-sites" class="manager-list"></div>
+            </section>
+
+            <section class="manager-section">
+              <div class="manager-heading">
+                <h3>可添加</h3>
+                <span id="hidden-sites-count" class="manager-count"></span>
+              </div>
+              <div id="hidden-sites" class="manager-list manager-list-muted"></div>
+            </section>
+          </div>
+        </section>
+      </div>
+
+      <div id="onboarding" class="tour-shell" hidden>
+        <div class="tour-shade tour-shade-top"></div>
+        <div class="tour-shade tour-shade-left"></div>
+        <div class="tour-shade tour-shade-right"></div>
+        <div class="tour-shade tour-shade-bottom"></div>
+        <div id="tour-focus" class="tour-focus" hidden></div>
+        <section
+          id="tour-card"
+          class="tour-card"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="tour-title"
+        >
+          <div class="tour-stepline">
+            <span class="tour-kicker">首次使用指引</span>
+            <span id="tour-progress" class="tour-progress"></span>
+          </div>
+          <h2 id="tour-title"></h2>
+          <p id="tour-body"></p>
+          <div id="tour-dots" class="tour-dots" aria-hidden="true"></div>
+          <div class="tour-actions">
+            <button type="button" id="tour-skip" class="ghost-button">跳过</button>
+            <div class="tour-nav">
+              <button type="button" id="tour-prev" class="ghost-button">上一步</button>
+              <button type="button" id="tour-next" class="tour-next">下一步</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>
