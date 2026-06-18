@@ -54,13 +54,20 @@ jobs:
         run: npm ci
 
       - name: Build and upload Tauri release
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "ChatDock ${{ github.ref_name }}"
-          releaseBody: "Automated release for ${{ github.ref_name }}"
+          releaseBody: |
+            ChatDock ${{ github.ref_name }}
+
+            - Added image and file paste, drag-and-drop, and injection support
+            - Added AI availability probing with grayed-out states and persisted status
+            - Added right-click actions for bottom AI target pills
+            - Added a top-bar guide entry and about dialog
+            - Improved close confirmation and overall brand presentation
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
