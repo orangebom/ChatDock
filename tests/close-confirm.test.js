@@ -7,6 +7,7 @@ test("hasBlockingOverlay returns true when any modal-like layer is open", () => 
   assert.equal(hasBlockingOverlay(), false);
   assert.equal(hasBlockingOverlay({ siteManagerOpen: true }), true);
   assert.equal(hasBlockingOverlay({ closeConfirmOpen: true }), true);
+  assert.equal(hasBlockingOverlay({ aboutOpen: true }), true);
   assert.equal(hasBlockingOverlay({ onboardingOpen: true }), true);
   assert.equal(hasBlockingOverlay({ targetContextMenuOpen: true }), true);
 });

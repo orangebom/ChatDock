@@ -32,6 +32,7 @@
         <div id="page-tabs" class="page-tabs"></div>
         <div class="topbar-actions">
           <div id="app-version" class="app-version topbar-version" aria-label="软件版本">--</div>
+          <button type="button" id="open-onboarding" class="ghost-button" title="重新查看使用引导">引导</button>
           <button type="button" id="reload" class="ghost-button" title="刷新所有已选 AI">刷新</button>
           <button type="button" id="relayout" class="ghost-button" title="刷新当前页面布局">适配</button>
           <button
@@ -44,6 +45,7 @@
             <span class="theme-indicator" aria-hidden="true"></span>
             <span id="theme-toggle-label">暗色</span>
           </button>
+          <button type="button" id="open-about" class="ghost-button" title="关于 ChatDock">关于</button>
         </div>
       </header>
 
@@ -62,11 +64,14 @@
         </div>
 
         <form id="prompt-form" class="compact-form">
-          <textarea
-            id="prompt"
-            rows="1"
-            placeholder="向已选 AI 同时发送问题..."
-          ></textarea>
+          <div id="prompt-dropzone" class="compact-input-stack" data-drag-active="false">
+            <div id="prompt-attachments" class="prompt-attachments" hidden></div>
+            <textarea
+              id="prompt"
+              rows="1"
+              placeholder="向已选 AI 同时发送问题..."
+            ></textarea>
+          </div>
           <button type="submit" class="send-button compact-send" aria-label="发送问题">&gt;</button>
         </form>
       </section>
@@ -113,11 +118,8 @@
         >
           <header class="modal-header close-confirm-header">
             <div class="close-confirm-intro">
-              <div class="close-confirm-badge" aria-hidden="true">
-                <span class="close-confirm-orbit">
-                  <span class="close-confirm-orbit-ball close-confirm-orbit-ball-primary"></span>
-                  <span class="close-confirm-orbit-ball close-confirm-orbit-ball-secondary"></span>
-                </span>
+              <div class="close-confirm-badge brand-mark-frame brand-mark-frame-compact" aria-hidden="true">
+                <img src="./assets/chatdock-logo.png" alt="ChatDock logo" class="brand-mark-logo brand-mark-logo-compact" />
               </div>
               <span class="close-confirm-kicker">先确认一下</span>
             </div>
@@ -133,6 +135,43 @@
           <div class="close-confirm-actions">
             <button type="button" id="cancel-close-confirm" class="ghost-button">再看看</button>
             <button type="button" id="accept-close-confirm" class="tour-next close-confirm-accept">确认关闭</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="about-dialog" class="modal-shell" hidden>
+        <div class="modal-backdrop" data-close-about-backdrop="true"></div>
+        <section
+          class="modal-card modal-card-compact about-card"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="about-title"
+          aria-describedby="about-body"
+        >
+          <header class="modal-header about-header">
+            <button type="button" id="close-about" class="ghost-button modal-close">关闭</button>
+          </header>
+          <div class="about-body">
+            <div class="about-hero">
+              <div class="about-mark brand-mark-frame" aria-hidden="true">
+                <img src="./assets/chatdock-logo.png" alt="ChatDock logo" class="brand-mark-logo" />
+              </div>
+              <div class="about-copy">
+                <p class="about-kicker">Desktop AI Workspace</p>
+                <h2 id="about-title">ChatDock</h2>
+                <p id="about-body">把多个 AI 聊天窗口收进一个工作台，在一个窗口里统一提问、并排比较。</p>
+              </div>
+            </div>
+            <a
+              class="about-link"
+              href="https://github.com/orangebom/ChatDock"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <span class="about-link-label">GitHub 仓库</span>
+              <span class="about-link-value">github.com/orangebom/ChatDock</span>
+              <span class="about-link-arrow" aria-hidden="true">↗</span>
+            </a>
           </div>
         </section>
       </div>

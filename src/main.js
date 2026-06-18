@@ -37,6 +37,7 @@ const PROMPT_MIN_HEIGHT = 36;
 const PROMPT_MAX_HEIGHT = 116;
 const SITE_PROBE_TIMEOUT_MS = 7000;
 const SITE_AVAILABILITY_SYNC_EVENT = "site-availability-sync";
+const ATTACHMENT_DEBUG_EVENT = "attachment-injection-debug";
 
 const TEXT = {
   emptyTitle: "\u5c1a\u672a\u9009\u62e9 AI",
@@ -53,13 +54,13 @@ const ONBOARDING_STEPS = [
   },
   {
     title: "顶部这里管全局操作",
-    body: "你可以在这里切换分页、查看版本、刷新全部已选 AI、重新适配布局，以及切换明暗主题。",
+    body: "你可以在这里切换分页、查看版本、重新打开引导、刷新全部已选 AI、重新适配布局，以及切换明暗主题。",
     target: ".topbar",
     placement: "bottom",
   },
   {
     title: "这里勾选要显示的 AI",
-    body: "底部这一排是全局 AI 选择区。按勾选顺序自动分页，每页最多显示 4 个 AI。",
+    body: "底部这一排是全局 AI 选择区。按勾选顺序自动分页，每页最多显示 4 个 AI；右键某个 AI 还可以打开快捷菜单，直接移除或测试连通。",
     target: ".compact-topline",
     placement: "top",
   },
@@ -81,6 +82,12 @@ const ONBOARDING_STEPS = [
     target: "#manage-sites",
     placement: "top",
   },
+  {
+    title: "引导可以随时重新打开",
+    body: "如果中途忘了某个操作，点击顶部“引导”按钮，就能从第一步重新查看整套说明。",
+    target: "#open-onboarding",
+    placement: "bottom",
+  },
 ];
 
 const state = {
@@ -90,6 +97,7 @@ const state = {
   pendingSiteAvailability: new Set(),
   webviews: new Map(),
   pendingWebviews: new Map(),
+  webviewDropListeners: new Map(),
   toolbarWebviews: new Map(),
   pendingToolbarWebviews: new Map(),
   theme: document.documentElement.dataset.theme || "dark",
@@ -114,6 +122,9 @@ const state = {
     open: false,
     resolver: null,
   },
+  composerAttachments: [],
+  promptDropDepth: 0,
+  panelDropTarget: null,
   onboarding: {
     open: false,
     completed: false,
@@ -460,6 +471,7 @@ function isAnyOverlayOpen() {
   return hasBlockingOverlay({
     siteManagerOpen: isSiteManagerOpen(),
     closeConfirmOpen: isCloseConfirmOpen(),
+    aboutOpen: isAboutDialogOpen(),
     onboardingOpen: isOnboardingOpen(),
     targetContextMenuOpen: isTargetContextMenuOpen(),
   });
@@ -812,6 +824,598 @@ function autosizePrompt() {
   syncCompactBarHeight();
 }
 
+function createAttachmentId() {
+  return `attachment-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isImageType(file) {
+  return Boolean(file?.type && file.type.startsWith("image/"));
+}
+
+function formatAttachmentSize(size) {
+  if (!Number.isFinite(size) || size <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB"];
+  let value = size;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = value >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function dataUrlToBase64(dataUrl) {
+  const commaIndex = dataUrl.indexOf(",");
+  return commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : dataUrl;
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function normalizeAttachment(file) {
+  const dataUrl = await readFileAsDataUrl(file);
+  return {
+    id: createAttachmentId(),
+    name: file.name || "attachment",
+    type: file.type || "application/octet-stream",
+    size: Number(file.size) || 0,
+    kind: isImageType(file) ? "image" : "file",
+    previewUrl: isImageType(file) ? dataUrl : "",
+    base64: dataUrlToBase64(dataUrl),
+  };
+}
+
+function renderComposerAttachments() {
+  const container = document.querySelector("#prompt-attachments");
+  const dropzone = document.querySelector("#prompt-dropzone");
+  if (!container || !dropzone) {
+    return;
+  }
+
+  const attachments = state.composerAttachments;
+  container.innerHTML = "";
+  container.hidden = attachments.length === 0;
+  dropzone.dataset.hasAttachments = attachments.length > 0 ? "true" : "false";
+
+  for (const attachment of attachments) {
+    const item = document.createElement("div");
+    item.className = `prompt-attachment prompt-attachment-${attachment.kind}`;
+    item.dataset.attachmentId = attachment.id;
+
+    const thumb = document.createElement("div");
+    thumb.className = "prompt-attachment-thumb";
+    if (attachment.kind === "image" && attachment.previewUrl) {
+      const image = document.createElement("img");
+      image.src = attachment.previewUrl;
+      image.alt = attachment.name;
+      thumb.append(image);
+    } else {
+      const badge = document.createElement("span");
+      badge.className = "prompt-attachment-ext";
+      const extension = attachment.name.includes(".")
+        ? attachment.name.split(".").pop()
+        : "FILE";
+      badge.textContent = (extension || "FILE").slice(0, 4).toUpperCase();
+      thumb.append(badge);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "prompt-attachment-meta";
+
+    const name = document.createElement("div");
+    name.className = "prompt-attachment-name";
+    name.textContent = attachment.name;
+
+    const info = document.createElement("div");
+    info.className = "prompt-attachment-info";
+    info.textContent = `${attachment.kind === "image" ? "图片" : "文件"} · ${formatAttachmentSize(attachment.size)}`;
+
+    meta.append(name, info);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "prompt-attachment-remove";
+    remove.dataset.removeAttachment = attachment.id;
+    remove.setAttribute("aria-label", `移除 ${attachment.name}`);
+    remove.title = `移除 ${attachment.name}`;
+    remove.textContent = "×";
+
+    item.append(thumb, meta, remove);
+    container.append(item);
+  }
+
+  syncCompactBarHeight();
+}
+
+function setPromptDropActive(active) {
+  const dropzone = document.querySelector("#prompt-dropzone");
+  if (!dropzone) {
+    return;
+  }
+  dropzone.dataset.dragActive = active ? "true" : "false";
+}
+
+function setPanelDropTarget(label = null) {
+  if (state.panelDropTarget === label) {
+    return;
+  }
+
+  if (state.panelDropTarget) {
+    const previous = getPanelElement(state.panelDropTarget);
+    previous?.classList.remove("is-drop-target");
+  }
+
+  state.panelDropTarget = label;
+  if (!label) {
+    return;
+  }
+
+  const panel = getPanelElement(label);
+  panel?.classList.add("is-drop-target");
+}
+
+function clearDragVisualState() {
+  resetPromptDropState();
+  setPanelDropTarget(null);
+}
+
+function resetPromptDropState() {
+  state.promptDropDepth = 0;
+  setPromptDropActive(false);
+}
+
+function collectFilesFromItems(items) {
+  const files = [];
+  if (!items) {
+    return files;
+  }
+
+  for (const item of Array.from(items)) {
+    if (!item || item.kind !== "file") {
+      continue;
+    }
+    const file = item.getAsFile?.();
+    if (file) {
+      files.push(file);
+    }
+  }
+  return files;
+}
+
+function hasDraggedFiles(dataTransfer) {
+  if (!dataTransfer) {
+    return false;
+  }
+
+  if (Number(dataTransfer.files?.length) > 0) {
+    return true;
+  }
+
+  const itemList = Array.from(dataTransfer.items || []);
+  if (itemList.some((item) => item?.kind === "file")) {
+    return true;
+  }
+
+  return Array.from(dataTransfer.types || []).includes("Files");
+}
+
+function describeDragTransfer(dataTransfer) {
+  if (!dataTransfer) {
+    return {
+      hasTransfer: false,
+      files: 0,
+      items: [],
+      types: [],
+    };
+  }
+
+  return {
+    hasTransfer: true,
+    files: Number(dataTransfer.files?.length) || 0,
+    items: Array.from(dataTransfer.items || []).map((item) => ({
+      kind: item?.kind || "",
+      type: item?.type || "",
+    })),
+    types: Array.from(dataTransfer.types || []),
+  };
+}
+
+function guessMimeTypeFromName(name) {
+  const lowerName = String(name || "").toLowerCase();
+  if (lowerName.endsWith(".png")) return "image/png";
+  if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) return "image/jpeg";
+  if (lowerName.endsWith(".gif")) return "image/gif";
+  if (lowerName.endsWith(".webp")) return "image/webp";
+  if (lowerName.endsWith(".bmp")) return "image/bmp";
+  if (lowerName.endsWith(".svg")) return "image/svg+xml";
+  if (lowerName.endsWith(".pdf")) return "application/pdf";
+  if (lowerName.endsWith(".txt")) return "text/plain";
+  if (lowerName.endsWith(".md")) return "text/markdown";
+  if (lowerName.endsWith(".json")) return "application/json";
+  if (lowerName.endsWith(".csv")) return "text/csv";
+  if (lowerName.endsWith(".doc")) return "application/msword";
+  if (lowerName.endsWith(".docx")) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  if (lowerName.endsWith(".xls")) return "application/vnd.ms-excel";
+  if (lowerName.endsWith(".xlsx")) {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  }
+  if (lowerName.endsWith(".ppt")) return "application/vnd.ms-powerpoint";
+  if (lowerName.endsWith(".pptx")) {
+    return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  }
+  if (lowerName.endsWith(".zip")) return "application/zip";
+  return "application/octet-stream";
+}
+
+async function pathToAttachment(path) {
+  const name = String(path || "").split(/[/\\\\]/).pop() || "attachment";
+  const bytes = await invoke("read_file_bytes", { path });
+  const uint8 = Uint8Array.from(bytes || []);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < uint8.length; index += chunkSize) {
+    const chunk = uint8.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  const type = guessMimeTypeFromName(name);
+  const base64 = btoa(binary);
+  return {
+    id: createAttachmentId(),
+    name,
+    type,
+    size: uint8.length,
+    kind: type.startsWith("image/") ? "image" : "file",
+    previewUrl: type.startsWith("image/") ? `data:${type};base64,${base64}` : "",
+    base64,
+  };
+}
+
+async function appendComposerPaths(paths) {
+  const validPaths = Array.from(paths || []).filter(Boolean);
+  if (!validPaths.length) {
+    return 0;
+  }
+
+  const attachments = await Promise.all(validPaths.map((path) => pathToAttachment(path)));
+  const beforeCount = state.composerAttachments.length;
+  state.composerAttachments = uniqueAttachments(state.composerAttachments, attachments);
+  renderComposerAttachments();
+  scheduleLayoutRefresh("attachments-change", [0, 80, 220]);
+  return state.composerAttachments.length - beforeCount;
+}
+
+function uniqueAttachments(existing, incoming) {
+  const seen = new Set(existing.map((item) => `${item.name}::${item.size}::${item.type}::${item.base64}`));
+  const next = [...existing];
+  for (const item of incoming) {
+    const key = `${item.name}::${item.size}::${item.type}::${item.base64}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    next.push(item);
+  }
+  return next;
+}
+
+async function appendComposerFiles(files) {
+  const validFiles = Array.from(files || []).filter((file) => file && file.size >= 0);
+  if (!validFiles.length) {
+    return 0;
+  }
+
+  const attachments = await Promise.all(validFiles.map((file) => normalizeAttachment(file)));
+  const beforeCount = state.composerAttachments.length;
+  state.composerAttachments = uniqueAttachments(state.composerAttachments, attachments);
+  renderComposerAttachments();
+  scheduleLayoutRefresh("attachments-change", [0, 80, 220]);
+  return state.composerAttachments.length - beforeCount;
+}
+
+function removeComposerAttachment(attachmentId) {
+  const next = state.composerAttachments.filter((item) => item.id !== attachmentId);
+  if (next.length === state.composerAttachments.length) {
+    return;
+  }
+
+  state.composerAttachments = next;
+  renderComposerAttachments();
+  scheduleLayoutRefresh("attachments-change", [0, 80, 220]);
+}
+
+function clearComposerAttachments() {
+  if (!state.composerAttachments.length) {
+    return;
+  }
+  state.composerAttachments = [];
+  renderComposerAttachments();
+  scheduleLayoutRefresh("attachments-change", [0, 80, 220]);
+}
+
+function serializeComposerAttachments() {
+  return state.composerAttachments.map((attachment) => ({
+    name: attachment.name,
+    mimeType: attachment.type,
+    size: attachment.size,
+    kind: attachment.kind,
+    base64: attachment.base64,
+  }));
+}
+
+async function serializeAttachmentsFromPaths(paths) {
+  const validPaths = Array.from(paths || []).filter(Boolean);
+  if (!validPaths.length) {
+    return [];
+  }
+
+  const attachments = await Promise.all(validPaths.map((path) => pathToAttachment(path)));
+  return attachments.map((attachment) => ({
+    name: attachment.name,
+    mimeType: attachment.type,
+    size: attachment.size,
+    kind: attachment.kind,
+    base64: attachment.base64,
+  }));
+}
+
+function physicalToViewportPosition(position) {
+  if (!position) {
+    return null;
+  }
+
+  return {
+    x: position.x / window.devicePixelRatio,
+    y: position.y / window.devicePixelRatio,
+  };
+}
+
+function findPanelDropTarget(position) {
+  if (!position) {
+    logAttachmentDebug("panel-hit:none-position");
+    return null;
+  }
+
+  const viewportPosition = physicalToViewportPosition(position);
+  if (!viewportPosition) {
+    logAttachmentDebug("panel-hit:no-viewport-position", { position });
+    return null;
+  }
+
+  const labelMetrics = getVisibleTargets()
+    .map((label) => ({ label, metrics: paneMetrics(label) }))
+    .filter((entry) => entry.metrics);
+
+  for (const entry of labelMetrics) {
+    const { x, y, width, height } = entry.metrics;
+    if (
+      viewportPosition.x >= x &&
+      viewportPosition.x <= x + width &&
+      viewportPosition.y >= y &&
+      viewportPosition.y <= y + height
+    ) {
+      logAttachmentDebug("panel-hit:matched", {
+        label: entry.label,
+        position,
+        viewportPosition,
+        metrics: entry.metrics,
+      });
+      return entry.label;
+    }
+  }
+
+  logAttachmentDebug("panel-hit:missed", {
+    position,
+    viewportPosition,
+    visiblePanels: labelMetrics.map((entry) => ({
+      label: entry.label,
+      metrics: entry.metrics,
+    })),
+  });
+  return null;
+}
+
+async function injectAttachmentsIntoPanel(targetLabel, paths) {
+  logAttachmentDebug("panel-inject:start", {
+    targetLabel,
+    pathCount: Array.from(paths || []).filter(Boolean).length,
+  });
+  const attachments = await serializeAttachmentsFromPaths(paths);
+  if (!attachments.length) {
+    logAttachmentDebug("panel-inject:no-attachments", { targetLabel, paths });
+    return { ok: false, message: "没有可注入的附件" };
+  }
+
+  const result = await invoke("inject_attachments", {
+    target: targetLabel,
+    attachments,
+  });
+  logAttachmentDebug("panel-inject:result", {
+    targetLabel,
+    ok: result?.ok,
+    message: result?.message,
+    attachmentCount: attachments.length,
+  });
+  return result;
+}
+
+async function ensureWebviewDropListener(siteLabel, webviewInstance) {
+  if (!siteLabel || !webviewInstance || state.webviewDropListeners.has(siteLabel)) {
+    return;
+  }
+
+  const unlisten = await webviewInstance.onDragDropEvent(async (event) => {
+    logAttachmentDebug("child-webview-drag:event", {
+      siteLabel,
+      type: event.payload?.type,
+      position: event.payload?.position,
+      paths: event.payload?.paths || [],
+    });
+
+    if (event.payload?.type === "over" || event.payload?.type === "enter") {
+      setPanelDropTarget(siteLabel);
+      return;
+    }
+
+    if (event.payload?.type === "leave") {
+      setPanelDropTarget(null);
+      return;
+    }
+
+    if (event.payload?.type !== "drop") {
+      return;
+    }
+
+    setPanelDropTarget(null);
+    try {
+      const result = await injectAttachmentsIntoPanel(siteLabel, event.payload.paths || []);
+      if (result?.ok) {
+        const site = getSiteMeta(siteLabel);
+        setStatus(`已将附件注入 ${site?.title || siteLabel} 面板。`, "ok");
+      } else {
+        setStatus(`注入附件失败：${result?.message || "未知错误"}`, "fail");
+      }
+    } catch (error) {
+      console.error(error);
+      setStatus(`子面板拖拽失败：${error}`, "fail");
+    }
+  });
+
+  state.webviewDropListeners.set(siteLabel, unlisten);
+  logAttachmentDebug("child-webview-drag:listener-bound", { siteLabel });
+}
+
+function wirePromptAttachments() {
+  const promptField = document.querySelector("#prompt");
+  const dropzone = document.querySelector("#prompt-dropzone");
+  const attachments = document.querySelector("#prompt-attachments");
+  const compactBar = document.querySelector(".compact-bar");
+  if (!promptField || !dropzone || !attachments || !compactBar) {
+    return;
+  }
+
+  attachments.addEventListener("click", (event) => {
+    const button = event.target?.closest?.("[data-remove-attachment]");
+    if (!button) {
+      return;
+    }
+    removeComposerAttachment(button.dataset.removeAttachment);
+  });
+
+  promptField.addEventListener("paste", async (event) => {
+    const files = collectFilesFromItems(event.clipboardData?.items);
+    if (!files.length) {
+      return;
+    }
+
+    event.preventDefault();
+    try {
+      const count = await appendComposerFiles(files);
+      if (count > 0) {
+        setStatus(`??? ${count} ????`, "ok");
+      }
+    } catch (error) {
+      console.error(error);
+      setStatus(`???????${error}`, "fail");
+    }
+  });
+
+  const logDragEvent = (eventName, event, accepted = null) => {
+    console.info("[drag-debug]", eventName, {
+      accepted,
+      targetId: event.target?.id || "",
+      targetClass: event.target?.className || "",
+      currentTargetId: event.currentTarget?.id || "",
+      currentTargetClass: event.currentTarget?.className || "",
+      transfer: describeDragTransfer(event.dataTransfer),
+    });
+  };
+
+  const markDrag = (event, eventName = "drag") => {
+    const accepted = hasDraggedFiles(event.dataTransfer);
+    logDragEvent(eventName, event, accepted);
+    if (!accepted) {
+      return false;
+    }
+    event.preventDefault();
+    return true;
+  };
+
+  const handleDragEnter = (event) => {
+    if (!markDrag(event, "dragenter")) {
+      return;
+    }
+    state.promptDropDepth += 1;
+    setPromptDropActive(true);
+  };
+
+  const handleDragOver = (event) => {
+    if (!markDrag(event, "dragover")) {
+      return;
+    }
+    event.dataTransfer.dropEffect = "copy";
+    setPromptDropActive(true);
+  };
+
+  const handleDragLeave = (event) => {
+    const accepted = hasDraggedFiles(event.dataTransfer);
+    logDragEvent("dragleave", event, accepted);
+    if (!accepted) {
+      return;
+    }
+    event.preventDefault();
+    state.promptDropDepth = Math.max(0, state.promptDropDepth - 1);
+    if (state.promptDropDepth === 0 || event.currentTarget === event.target) {
+      setPromptDropActive(false);
+    }
+  };
+
+  const handleDrop = async (event) => {
+    if (!markDrag(event, "drop")) {
+      return;
+    }
+    clearDragVisualState();
+    const files = Array.from(event.dataTransfer?.files || []);
+    console.info("[drag-debug]", "drop-files", files.map((file) => ({
+      name: file.name,
+      type: file.type,
+      size: file.size,
+    })));
+    if (!files.length) {
+      return;
+    }
+    try {
+      const count = await appendComposerFiles(files);
+      if (count > 0) {
+        setStatus(`??? ${count} ????`, "ok");
+      }
+    } catch (error) {
+      console.error(error);
+      setStatus(`???????${error}`, "fail");
+    }
+  };
+
+  for (const node of [compactBar, dropzone, promptField]) {
+    node.addEventListener("dragenter", handleDragEnter);
+    node.addEventListener("dragover", handleDragOver);
+    node.addEventListener("dragleave", handleDragLeave);
+    node.addEventListener("drop", handleDrop);
+  }
+
+  renderComposerAttachments();
+}
 async function renderAppVersion() {
   const versionNode = document.querySelector("#app-version");
   if (!versionNode) {
@@ -908,6 +1512,10 @@ function setStatus(message, level = "muted") {
   }
   status.dataset.level = level;
   status.textContent = message;
+}
+
+function logAttachmentDebug(stage, payload = {}) {
+  console.info("[attachment-debug]", stage, payload);
 }
 
 function renderResults(results) {
@@ -1391,6 +1999,7 @@ async function ensureWebview(siteLabel, shouldShow = true) {
       await current.hide();
     }
 
+    await ensureWebviewDropListener(siteLabel, current);
     state.webviews.set(siteLabel, current);
     return current;
   })();
@@ -1688,29 +2297,16 @@ function renderEmptyState() {
   const glow = document.createElement("div");
   glow.className = "layout-empty-preview-glow";
 
-  const pulse = document.createElement("div");
-  pulse.className = "layout-empty-pulse";
+  const mark = document.createElement("div");
+  mark.className = "layout-empty-mark brand-mark-frame";
 
-  const ringSpecs = ["ring-blue", "ring-green", "ring-cyan"];
-  for (const className of ringSpecs) {
-    const ring = document.createElement("span");
-    ring.className = `layout-empty-wave ${className}`;
-    pulse.appendChild(ring);
-  }
+  const logo = document.createElement("img");
+  logo.className = "brand-mark-logo layout-empty-mark-logo";
+  logo.src = "./assets/chatdock-logo.png";
+  logo.alt = "ChatDock logo";
 
-  const core = document.createElement("div");
-  core.className = "layout-empty-pulse-core";
-
-  const coreInner = document.createElement("div");
-  coreInner.className = "layout-empty-pulse-core-inner";
-
-  const coreLabel = document.createElement("span");
-  coreLabel.className = "layout-empty-pulse-label";
-  coreLabel.textContent = "AI";
-
-  core.append(coreInner, coreLabel);
-  pulse.append(core);
-  preview.append(glow, pulse);
+  mark.appendChild(logo);
+  preview.append(glow, mark);
 
   const title = document.createElement("h2");
   title.textContent = TEXT.emptyTitle;
@@ -2093,6 +2689,11 @@ function isCloseConfirmOpen() {
   return Boolean(modal && !modal.hidden);
 }
 
+function isAboutDialogOpen() {
+  const modal = document.querySelector("#about-dialog");
+  return Boolean(modal && !modal.hidden);
+}
+
 async function openSiteManager() {
   const modal = document.querySelector("#site-manager");
   if (!modal) {
@@ -2112,6 +2713,44 @@ async function closeSiteManager() {
   if (!modal) {
     return;
   }
+  modal.hidden = true;
+  await refreshLayout();
+}
+
+async function openAboutDialog() {
+  const modal = document.querySelector("#about-dialog");
+  if (!modal) {
+    return;
+  }
+
+  if (isSiteManagerOpen()) {
+    await closeSiteManager();
+  }
+
+  if (isOnboardingOpen()) {
+    await closeOnboarding(true);
+  }
+
+  if (isTargetContextMenuOpen()) {
+    closeTargetContextMenu();
+  }
+
+  modal.hidden = false;
+  await syncVisibleWebviews();
+  await syncVisibleToolbarWebviews();
+
+  const closeButton = document.querySelector("#close-about");
+  window.requestAnimationFrame(() => {
+    closeButton?.focus();
+  });
+}
+
+async function closeAboutDialog() {
+  const modal = document.querySelector("#about-dialog");
+  if (!modal) {
+    return;
+  }
+
   modal.hidden = true;
   await refreshLayout();
 }
@@ -2368,8 +3007,9 @@ async function reloadTargets(targets) {
 async function sendPrompt() {
   const promptField = document.querySelector("#prompt");
   const prompt = promptField.value.trim();
-  if (!prompt) {
-    setStatus("发送前请先输入问题。", "warn");
+  const attachments = serializeComposerAttachments();
+  if (!prompt && attachments.length === 0) {
+    setStatus("发送前请先输入问题或添加附件。", "warn");
     return;
   }
 
@@ -2379,11 +3019,12 @@ async function sendPrompt() {
     return;
   }
 
-  setStatus(`正在向 ${targets.length} 个 AI 发送问题...`, "working");
+  const attachmentSuffix = attachments.length ? `，附带 ${attachments.length} 个附件` : "";
+  setStatus(`正在向 ${targets.length} 个 AI 发送内容${attachmentSuffix}...`, "working");
   await ensureTargetsReady(targets, false);
   await sleep(380);
   try {
-    const results = await invoke("broadcast_prompt", { prompt, targets });
+    const results = await invoke("broadcast_prompt", { prompt, targets, attachments });
     renderResults(results);
     const okCount = results.filter((item) => item.ok).length;
     setStatus(
@@ -2395,6 +3036,7 @@ async function sendPrompt() {
     setStatus(`发送失败：${error}`, "fail");
   } finally {
     promptField.value = "";
+    clearComposerAttachments();
     autosizePrompt();
     await refreshLayout();
   }
@@ -2548,6 +3190,69 @@ async function boot() {
     syncSiteAvailability(label, payload.available !== false, payload.message || "", { fromWebview: true });
   });
 
+  await tauriEvent.listen(ATTACHMENT_DEBUG_EVENT, ({ payload }) => {
+    logAttachmentDebug("backend-event", payload || {});
+  });
+
+  await appWindow.onDragDropEvent(async (event) => {
+    console.info("[drag-debug][tauri]", event.payload);
+    const dropTargetLabel = findPanelDropTarget(event.payload?.position);
+    setPanelDropTarget(dropTargetLabel);
+    logAttachmentDebug("tauri-drag:event", {
+      type: event.payload?.type,
+      position: event.payload?.position,
+      paths: event.payload?.paths || [],
+      dropTargetLabel,
+    });
+
+    if (event.payload?.type === "enter" || event.payload?.type === "over") {
+      if (dropTargetLabel) {
+        setPromptDropActive(false);
+      } else {
+        setPromptDropActive(true);
+      }
+      return;
+    }
+
+    if (event.payload?.type === "leave") {
+      clearDragVisualState();
+      return;
+    }
+
+    if (event.payload?.type !== "drop") {
+      return;
+    }
+
+    clearDragVisualState();
+    try {
+      if (dropTargetLabel) {
+        logAttachmentDebug("tauri-drag:panel-route", {
+          dropTargetLabel,
+          pathCount: (event.payload?.paths || []).length,
+        });
+        const result = await injectAttachmentsIntoPanel(dropTargetLabel, event.payload.paths || []);
+        if (result?.ok) {
+          const site = getSiteMeta(dropTargetLabel);
+          setStatus(`已将附件注入 ${site?.title || dropTargetLabel} 面板。`, "ok");
+        } else {
+          setStatus(`注入附件失败：${result?.message || "未知错误"}`, "fail");
+        }
+        return;
+      }
+
+      logAttachmentDebug("tauri-drag:composer-route", {
+        pathCount: (event.payload?.paths || []).length,
+      });
+      const count = await appendComposerPaths(event.payload.paths || []);
+      if (count > 0) {
+        setStatus(`已拖入 ${count} 个附件。`, "ok");
+      }
+    } catch (error) {
+      console.error(error);
+      setStatus(`添加附件失败：${error}`, "fail");
+    }
+  });
+
   void ensureSiteAvailability(state.workspace.visibleSiteLabels, { force: true });
 
   await refreshLayout();
@@ -2560,6 +3265,7 @@ async function boot() {
 
   const promptField = document.querySelector("#prompt");
   autosizePrompt();
+  wirePromptAttachments();
   promptField.addEventListener("input", () => {
     autosizePrompt();
     scheduleLayoutRefresh("prompt-input", [0, 60, 180]);
@@ -2577,8 +3283,22 @@ async function boot() {
     await refreshLayout();
     setStatus("\u5e03\u5c40\u5df2\u91cd\u65b0\u8ba1\u7b97\u3002", "ok");
   });
+  document.querySelector("#open-onboarding").addEventListener("click", async () => {
+    await openOnboarding(true);
+  });
+  document.querySelector("#open-about").addEventListener("click", async () => {
+    await openAboutDialog();
+  });
   document.querySelector("#manage-sites").addEventListener("click", async () => {
     await openSiteManager();
+  });
+  document.querySelector("#close-about").addEventListener("click", async () => {
+    await closeAboutDialog();
+  });
+  document.querySelector("#about-dialog").addEventListener("click", async (event) => {
+    if (event.target?.dataset?.closeAboutBackdrop === "true") {
+      await closeAboutDialog();
+    }
   });
   document.querySelector("#close-site-manager").addEventListener("click", async () => {
     await closeSiteManager();
@@ -2636,6 +3356,11 @@ async function boot() {
     if (event.key === "Escape" && isCloseConfirmOpen()) {
       event.preventDefault();
       await resolveCloseConfirm(false);
+      return;
+    }
+    if (event.key === "Escape" && isAboutDialogOpen()) {
+      event.preventDefault();
+      await closeAboutDialog();
       return;
     }
     if (event.key === "Escape" && isSiteManagerOpen()) {

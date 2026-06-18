@@ -14,6 +14,8 @@ const releaseWorkflow = fs.readFileSync(
   new URL("../.github/workflows/release.yml", import.meta.url),
   "utf8",
 );
+const mainJs = fs.readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
+const tauriLib = fs.readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 
 test("close confirm dialog contract exists in HTML", () => {
   for (const id of [
@@ -22,6 +24,12 @@ test("close confirm dialog contract exists in HTML", () => {
     'id="close-confirm-body"',
     'id="cancel-close-confirm"',
     'id="accept-close-confirm"',
+    'id="open-about"',
+    'id="about-dialog"',
+    'id="about-title"',
+    'id="about-body"',
+    'id="close-about"',
+    'data-close-about-backdrop="true"',
     'data-close-confirm-backdrop="true"',
     'id="target-context-menu"',
     'id="target-context-title"',
@@ -37,6 +45,10 @@ test("close confirm and unavailable target styles exist", () => {
     ".close-confirm-card",
     ".close-confirm-actions",
     ".close-confirm-accept",
+    ".about-card",
+    ".about-body",
+    ".about-mark",
+    ".about-link",
     ".target-pill.unavailable",
     ".target-pill.context-open",
     ".context-menu",
@@ -52,6 +64,7 @@ test("window config no longer enforces min size", () => {
   assert.ok(mainWindow, "main window config missing");
   assert.equal("minWidth" in mainWindow, false);
   assert.equal("minHeight" in mainWindow, false);
+  assert.equal(mainWindow.dragDropEnabled, false);
 });
 
 test("window permissions allow both close request interception and destroy", () => {
@@ -64,4 +77,72 @@ test("release workflow publishes version tags", () => {
   assert.equal(releaseWorkflow.includes('tags:'), true);
   assert.equal(releaseWorkflow.includes('- "v*"'), true);
   assert.equal(releaseWorkflow.includes("tauri-apps/tauri-action@v1"), true);
+});
+
+test("composer supports pasted and dropped attachments end to end", () => {
+  for (const fragment of [
+    'id="prompt-dropzone"',
+    'id="prompt-attachments"',
+  ]) {
+    assert.equal(indexHtml.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    "function wirePromptAttachments()",
+    "function hasDraggedFiles(dataTransfer)",
+    "function describeDragTransfer(dataTransfer)",
+    "async function appendComposerPaths(paths)",
+    "function findPanelDropTarget(position)",
+    "async function injectAttachmentsIntoPanel(targetLabel, paths)",
+    "function physicalToViewportPosition(position)",
+    "function logAttachmentDebug(stage, payload = {})",
+    "function isAboutDialogOpen()",
+    "async function openAboutDialog()",
+    "async function closeAboutDialog()",
+    "async function ensureWebviewDropListener(siteLabel, webviewInstance)",
+    'await tauriEvent.listen(ATTACHMENT_DEBUG_EVENT, ({ payload }) => {',
+    'invoke("inject_attachments", {',
+    'await webviewInstance.onDragDropEvent(async (event) => {',
+    'await appWindow.onDragDropEvent(async (event) => {',
+    'invoke("read_file_bytes", { path })',
+    'promptField.addEventListener("paste"',
+    'console.info("[drag-debug]"',
+    'for (const node of [compactBar, dropzone, promptField])',
+    "serializeComposerAttachments()",
+    'invoke("broadcast_prompt", { prompt, targets, attachments })',
+  ]) {
+    assert.equal(mainJs.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    "struct PromptAttachment",
+    "struct AttachmentDebugEvent",
+    "attachments: Option<Vec<PromptAttachment>>",
+    "fn inject_attachments(",
+    "fn emit_attachment_debug(app: &AppHandle<tauri::Wry>, label: &str, stage: &str, message: &str)",
+    'const ATTACHMENT_DEBUG_EVENT: &str = "attachment-injection-debug";',
+    "fn read_file_bytes(path: String) -> Result<Vec<u8>, String>",
+    "const deadline = Date.now() + 5000;",
+    "const shouldSubmit = ",
+    "const sleepWithin = async (ms, deadline) => {{",
+    "const uploadAttachments = async (anchor, deadline) => {{",
+    "const waitForUploadToSettle = async (anchor, deadline) => {{",
+    "const waitForSendReady = async (input, deadline) => {{",
+    "const findBusyIndicators = (anchor) => {{",
+    "const collectFileInputs = (anchor) => {{",
+    "const findPromptInput = () => {{",
+    "const collectDeepMatches = (root, predicate, includeRoot = false) => {{",
+    "const ensureFileInputs = async (anchor, deadline) => {{",
+    "const collectAttachTriggers = (anchor) => {{",
+    "element instanceof HTMLInputElement && element.type === 'file'",
+    "assignFilesToInput(input, acceptedFiles)",
+  ]) {
+    assert.equal(tauriLib.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  assert.equal(
+    tauriLib.includes("input.click?.();"),
+    false,
+    "file upload injection should not open the native file picker",
+  );
 });

@@ -1,10 +1,11 @@
 export function hasBlockingOverlay({
   siteManagerOpen = false,
   closeConfirmOpen = false,
+  aboutOpen = false,
   onboardingOpen = false,
   targetContextMenuOpen = false,
 } = {}) {
-  return siteManagerOpen || closeConfirmOpen || onboardingOpen || targetContextMenuOpen;
+  return siteManagerOpen || closeConfirmOpen || aboutOpen || onboardingOpen || targetContextMenuOpen;
 }
 
 export async function handleCloseRequest({
