@@ -7,6 +7,7 @@ import {
   clearSelectionState,
   getLabelsToProbe,
   isSiteUnavailable,
+  markAvailabilityFromWebview,
   toggleSiteSelection,
 } from "../src/ui-state.js";
 
@@ -37,15 +38,56 @@ test("getLabelsToProbe ignores duplicates, unknown labels, cached labels, and pe
   assert.deepEqual(labels, ["gemini"]);
 });
 
+test("getLabelsToProbe can force recheck for cached labels while still skipping pending labels", () => {
+  const siteMap = new Map([
+    ["chatgpt", {}],
+    ["claude", {}],
+    ["gemini", {}],
+  ]);
+  const siteAvailability = new Map([
+    ["chatgpt", { available: false, message: "不可访问", verifiedByWebview: false }],
+    ["claude", { available: true, message: "", verifiedByWebview: false }],
+  ]);
+  const pendingSiteAvailability = new Set(["gemini"]);
+
+  const labels = getLabelsToProbe(
+    ["chatgpt", "claude", "gemini"],
+    siteMap,
+    siteAvailability,
+    pendingSiteAvailability,
+    { force: true },
+  );
+
+  assert.deepEqual(labels, ["chatgpt", "claude"]);
+});
+
 test("applyAvailabilityResults keeps success message empty and falls back on missing results", () => {
   const result = applyAvailabilityResults(
     ["chatgpt", "claude"],
     [{ label: "chatgpt", available: true, message: "" }],
   );
 
-  assert.deepEqual(result.get("chatgpt"), { available: true, message: "" });
-  assert.deepEqual(result.get("claude"), { available: false, message: "不可访问" });
+  assert.deepEqual(result.get("chatgpt"), { available: true, message: "", verifiedByWebview: false });
+  assert.deepEqual(result.get("claude"), { available: false, message: "不可访问", verifiedByWebview: false });
   assert.equal(isSiteUnavailable(result, "claude"), true);
+});
+
+test("markAvailabilityFromWebview treats verified success as available even after prior probe failure", () => {
+  const siteAvailability = new Map([
+    ["chatgpt", { available: false, message: "不可访问", verifiedByWebview: false }],
+  ]);
+
+  siteAvailability.set(
+    "chatgpt",
+    markAvailabilityFromWebview(siteAvailability, "chatgpt", true),
+  );
+
+  assert.deepEqual(siteAvailability.get("chatgpt"), {
+    available: true,
+    message: "",
+    verifiedByWebview: true,
+  });
+  assert.equal(isSiteUnavailable(siteAvailability, "chatgpt"), false);
 });
 
 test("clearSelectionState resets paging and maximized state", () => {

@@ -23,6 +23,10 @@ test("close confirm dialog contract exists in HTML", () => {
     'id="cancel-close-confirm"',
     'id="accept-close-confirm"',
     'data-close-confirm-backdrop="true"',
+    'id="target-context-menu"',
+    'id="target-context-title"',
+    'data-context-action="test-connectivity"',
+    'data-context-action="remove"',
   ]) {
     assert.equal(indexHtml.includes(id), true, `missing ${id}`);
   }
@@ -34,6 +38,9 @@ test("close confirm and unavailable target styles exist", () => {
     ".close-confirm-actions",
     ".close-confirm-accept",
     ".target-pill.unavailable",
+    ".target-pill.context-open",
+    ".context-menu",
+    ".context-menu-item",
     ":root[data-theme=\"light\"] .target-pill.unavailable",
   ]) {
     assert.equal(stylesCss.includes(selector), true, `missing ${selector}`);

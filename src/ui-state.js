@@ -5,11 +5,22 @@ export function getSiteAvailability(siteAvailability, label) {
 }
 
 export function isSiteUnavailable(siteAvailability, label) {
-  return getSiteAvailability(siteAvailability, label)?.available === false;
+  const availability = getSiteAvailability(siteAvailability, label);
+  return availability?.available === false && !availability?.verifiedByWebview;
 }
 
-export function getLabelsToProbe(targetLabels, siteMap, siteAvailability, pendingSiteAvailability) {
+export function getLabelsToProbe(
+  targetLabels,
+  siteMap,
+  siteAvailability,
+  pendingSiteAvailability,
+  options = {},
+) {
+  const { force = false } = options;
   const uniqueLabels = [...new Set(targetLabels)].filter((label) => siteMap.has(label));
+  if (force) {
+    return uniqueLabels.filter((label) => !pendingSiteAvailability.has(label));
+  }
   return uniqueLabels.filter(
     (label) => !siteAvailability.has(label) && !pendingSiteAvailability.has(label),
   );
@@ -28,10 +39,21 @@ export function applyAvailabilityResults(labels, results, fallbackMessage = "不
         {
           available: !!result?.available,
           message: result?.message || (result ? "" : fallbackMessage),
+          verifiedByWebview: false,
         },
       ];
     }),
   );
+}
+
+export function markAvailabilityFromWebview(siteAvailability, label, available, message = "") {
+  const current = getSiteAvailability(siteAvailability, label);
+  return {
+    ...current,
+    available,
+    message: available ? "" : (message || current?.message || "不可访问"),
+    verifiedByWebview: true,
+  };
 }
 
 export function clearSelectionState(pageLayouts, normalizePageLayouts) {

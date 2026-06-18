@@ -112,11 +112,24 @@
           aria-describedby="close-confirm-body"
         >
           <header class="modal-header close-confirm-header">
-            <div>
+            <div class="close-confirm-intro">
+              <div class="close-confirm-badge" aria-hidden="true">
+                <span class="close-confirm-orbit">
+                  <span class="close-confirm-orbit-ball close-confirm-orbit-ball-primary"></span>
+                  <span class="close-confirm-orbit-ball close-confirm-orbit-ball-secondary"></span>
+                </span>
+              </div>
+              <span class="close-confirm-kicker">先确认一下</span>
+            </div>
+            <div class="close-confirm-copy">
               <h2 id="close-confirm-title">确认关闭 ChatDock</h2>
               <p id="close-confirm-body">当前窗口关闭后，本次工作台布局会保留，下次打开可继续使用。</p>
             </div>
           </header>
+          <div class="close-confirm-note" aria-hidden="true">
+            <span class="close-confirm-note-pill">布局会保留</span>
+            <span class="close-confirm-note-text">下次打开还能从现在的位置继续。</span>
+          </div>
           <div class="close-confirm-actions">
             <button type="button" id="cancel-close-confirm" class="ghost-button">再看看</button>
             <button type="button" id="accept-close-confirm" class="tour-next close-confirm-accept">确认关闭</button>
@@ -151,6 +164,23 @@
               <button type="button" id="tour-next" class="tour-next">下一步</button>
             </div>
           </div>
+        </section>
+      </div>
+
+      <div id="target-context-menu" class="context-menu-shell" hidden>
+        <div class="context-menu-backdrop" data-close-target-context-menu="true"></div>
+        <section
+          class="context-menu"
+          role="menu"
+          aria-labelledby="target-context-title"
+        >
+          <div id="target-context-title" class="context-menu-title">AI 操作</div>
+          <button type="button" class="context-menu-item" data-context-action="test-connectivity" role="menuitem">
+            测试连通
+          </button>
+          <button type="button" class="context-menu-item context-menu-item-danger" data-context-action="remove" role="menuitem">
+            移除
+          </button>
         </section>
       </div>
     </main>

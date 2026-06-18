@@ -6,6 +6,7 @@ import {
   getLabelsToProbe,
   getSiteAvailability as readSiteAvailability,
   isSiteUnavailable as readSiteUnavailable,
+  markAvailabilityFromWebview,
   toggleSiteSelection,
 } from "./ui-state.js";
 
@@ -21,6 +22,7 @@ const THEME_STORAGE_KEY = "ai-compare-theme";
 const WORKSPACE_STORAGE_KEY = "ai-compare-workspace-v2";
 const LEGACY_WORKSPACE_STORAGE_KEY = "ai-compare-workspace-v1";
 const ONBOARDING_STORAGE_KEY = "chatdock-onboarding-v1";
+const SITE_AVAILABILITY_STORAGE_KEY = "chatdock-site-availability-v1";
 const MAX_SITES_PER_PAGE = 4;
 
 const DEFAULT_LAYOUT_STATE = {
@@ -34,6 +36,7 @@ const PANEL_TOOLBAR_ROUTE = "/panel-toolbar.html";
 const PROMPT_MIN_HEIGHT = 36;
 const PROMPT_MAX_HEIGHT = 116;
 const SITE_PROBE_TIMEOUT_MS = 7000;
+const SITE_AVAILABILITY_SYNC_EVENT = "site-availability-sync";
 
 const TEXT = {
   emptyTitle: "\u5c1a\u672a\u9009\u62e9 AI",
@@ -101,6 +104,12 @@ const state = {
   resizeObserver: null,
   compactBarObserver: null,
   sortables: [],
+  targetContextMenu: {
+    open: false,
+    siteLabel: null,
+    x: 0,
+    y: 0,
+  },
   closeConfirm: {
     open: false,
     resolver: null,
@@ -278,6 +287,27 @@ function isSiteUnavailable(label) {
   return readSiteUnavailable(state.siteAvailability, label);
 }
 
+function syncSiteAvailability(label, available, message = "", options = {}) {
+  if (!state.siteMap.has(label)) {
+    return;
+  }
+
+  const next = options.fromWebview
+    ? markAvailabilityFromWebview(state.siteAvailability, label, available, message)
+    : {
+        available,
+        message: available ? "" : (message || "不可访问"),
+        verifiedByWebview: false,
+      };
+
+  state.siteAvailability.set(label, {
+    ...next,
+    checkedAt: Date.now(),
+  });
+  persistSiteAvailability();
+  renderGlobalTargets();
+}
+
 function getVisibleManagedSites() {
   const visibleLabels = new Set(state.workspace.visibleSiteLabels);
   return getOrderedSites().filter((site) => visibleLabels.has(site.label));
@@ -361,6 +391,63 @@ function loadOnboardingCompleted() {
   }
 }
 
+function sanitizeAvailabilityRecord(label, value) {
+  if (!label || typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  return {
+    available: value.available === true,
+    message: value.available === true ? "" : (typeof value.message === "string" && value.message) || "不可访问",
+    verifiedByWebview: value.verifiedByWebview === true,
+    checkedAt: Number.isFinite(value.checkedAt) ? value.checkedAt : null,
+  };
+}
+
+function loadSiteAvailability() {
+  try {
+    const raw = window.localStorage.getItem(SITE_AVAILABILITY_STORAGE_KEY);
+    if (!raw) {
+      return new Map();
+    }
+
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return new Map();
+    }
+
+    return new Map(
+      Object.entries(parsed)
+        .map(([label, value]) => [label, sanitizeAvailabilityRecord(label, value)])
+        .filter((entry) => entry[1]),
+    );
+  } catch (_error) {
+    return new Map();
+  }
+}
+
+function persistSiteAvailability() {
+  const payload = Object.fromEntries(
+    [...state.siteAvailability.entries()]
+      .filter(([label]) => state.siteMap.has(label))
+      .map(([label, value]) => [
+        label,
+        {
+          available: value.available === true,
+          message: value.available === true ? "" : value.message || "不可访问",
+          verifiedByWebview: value.verifiedByWebview === true,
+          checkedAt: Number.isFinite(value.checkedAt) ? value.checkedAt : Date.now(),
+        },
+      ]),
+  );
+
+  try {
+    window.localStorage.setItem(SITE_AVAILABILITY_STORAGE_KEY, JSON.stringify(payload));
+  } catch (_error) {
+    // Ignore storage errors and continue.
+  }
+}
+
 function persistOnboardingCompleted() {
   try {
     window.localStorage.setItem(ONBOARDING_STORAGE_KEY, "done");
@@ -374,7 +461,104 @@ function isAnyOverlayOpen() {
     siteManagerOpen: isSiteManagerOpen(),
     closeConfirmOpen: isCloseConfirmOpen(),
     onboardingOpen: isOnboardingOpen(),
+    targetContextMenuOpen: isTargetContextMenuOpen(),
   });
+}
+
+function getContextMenuState() {
+  return state.targetContextMenu;
+}
+
+function closeTargetContextMenu() {
+  const shell = document.querySelector("#target-context-menu");
+  const menu = shell?.querySelector(".context-menu");
+  const activePill = state.targetContextMenu.siteLabel
+    ? document.querySelector(`.target-pill[data-site-label="${state.targetContextMenu.siteLabel}"]`)
+    : null;
+
+  shell && (shell.hidden = true);
+  menu?.style.removeProperty("left");
+  menu?.style.removeProperty("top");
+  activePill?.classList.remove("context-open");
+
+  state.targetContextMenu.open = false;
+  state.targetContextMenu.siteLabel = null;
+  state.targetContextMenu.x = 0;
+  state.targetContextMenu.y = 0;
+  void syncVisibleWebviews();
+  void syncVisibleToolbarWebviews();
+}
+
+function positionTargetContextMenu() {
+  const shell = document.querySelector("#target-context-menu");
+  const menu = shell?.querySelector(".context-menu");
+  if (!shell || !menu || shell.hidden) {
+    return;
+  }
+
+  const padding = 10;
+  const width = menu.offsetWidth || 156;
+  const height = menu.offsetHeight || 94;
+  const left = clamp(state.targetContextMenu.x, padding, Math.max(padding, window.innerWidth - width - padding));
+  const top = clamp(state.targetContextMenu.y, padding, Math.max(padding, window.innerHeight - height - padding));
+
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function openTargetContextMenu(siteLabel, x, y) {
+  const site = getSiteMeta(siteLabel);
+  const shell = document.querySelector("#target-context-menu");
+  const title = document.querySelector("#target-context-title");
+  if (!site || !shell || !title) {
+    return;
+  }
+
+  const previousPill = state.targetContextMenu.siteLabel
+    ? document.querySelector(`.target-pill[data-site-label="${state.targetContextMenu.siteLabel}"]`)
+    : null;
+  previousPill?.classList.remove("context-open");
+
+  state.targetContextMenu.open = true;
+  state.targetContextMenu.siteLabel = siteLabel;
+  state.targetContextMenu.x = x;
+  state.targetContextMenu.y = y;
+
+  title.textContent = `${site.title} 操作`;
+  shell.hidden = false;
+
+  const nextPill = document.querySelector(`.target-pill[data-site-label="${siteLabel}"]`);
+  nextPill?.classList.add("context-open");
+
+  positionTargetContextMenu();
+  void syncVisibleWebviews();
+  void syncVisibleToolbarWebviews();
+}
+
+async function runTargetContextAction(action, siteLabel) {
+  const site = getSiteMeta(siteLabel);
+  if (!site) {
+    return;
+  }
+
+  if (action === "remove") {
+    removeVisibleSite(siteLabel);
+    renderWorkspace();
+    await refreshLayout();
+    setStatus(`${site.title} 已从底部 AI 选择中移除。`, "ok");
+    return;
+  }
+
+  if (action === "test-connectivity") {
+    setStatus(`正在测试 ${site.title} 连通性...`, "working");
+    await ensureSiteAvailability([siteLabel], { force: true });
+    const availability = getSiteAvailability(siteLabel);
+    if (availability?.available) {
+      setStatus(`${site.title} 连通正常。`, "ok");
+    } else {
+      setStatus(`${site.title} 当前不可访问。`, "warn");
+    }
+  }
 }
 
 function isOnboardingOpen() {
@@ -403,6 +587,11 @@ function getTargetRect(selector) {
     return null;
   }
   return rect;
+}
+
+function isTargetContextMenuOpen() {
+  const shell = document.querySelector("#target-context-menu");
+  return Boolean(shell && !shell.hidden);
 }
 
 function clampCardPosition(value, size, viewportSize, padding = getViewportPadding()) {
@@ -577,6 +766,8 @@ async function openOnboarding(resetToFirst = false) {
   state.onboarding.open = true;
   shell.hidden = false;
   renderOnboardingStep();
+  await syncVisibleWebviews();
+  await syncVisibleToolbarWebviews();
   await refreshLayout(1);
 }
 
@@ -861,12 +1052,13 @@ function createStatusDot(accentColor) {
   return dot;
 }
 
-async function ensureSiteAvailability(targetLabels = state.workspace?.visibleSiteLabels || []) {
+async function ensureSiteAvailability(targetLabels = state.workspace?.visibleSiteLabels || [], options = {}) {
   const labelsToProbe = getLabelsToProbe(
     targetLabels,
     state.siteMap,
     state.siteAvailability,
     state.pendingSiteAvailability,
+    options,
   );
 
   if (!labelsToProbe.length) {
@@ -885,16 +1077,31 @@ async function ensureSiteAvailability(targetLabels = state.workspace?.visibleSit
     });
 
     applyAvailabilityResults(labelsToProbe, results).forEach((result, label) => {
-      state.siteAvailability.set(label, result);
+      const current = state.siteAvailability.get(label);
+      if (current?.verifiedByWebview && current.available) {
+        return;
+      }
+      state.siteAvailability.set(label, {
+        ...result,
+        checkedAt: Date.now(),
+      });
     });
   } catch (_error) {
     applyAvailabilityResults(labelsToProbe, [], "\u4e0d\u53ef\u8bbf\u95ee").forEach((result, label) => {
-      state.siteAvailability.set(label, result);
+      const current = state.siteAvailability.get(label);
+      if (current?.verifiedByWebview && current.available) {
+        return;
+      }
+      state.siteAvailability.set(label, {
+        ...result,
+        checkedAt: Date.now(),
+      });
     });
   } finally {
     labelsToProbe.forEach((label) => {
       state.pendingSiteAvailability.delete(label);
     });
+    persistSiteAvailability();
     renderGlobalTargets();
   }
 }
@@ -1148,7 +1355,7 @@ async function ensureWebview(siteLabel, shouldShow = true) {
     const metrics = await panePhysicalMetrics(siteLabel);
 
     if (!current) {
-      new Webview(appWindow, site.label, {
+      const webviewInstance = new Webview(appWindow, site.label, {
         url: site.url,
         x: metrics?.x ?? 0,
         y: metrics?.y ?? 0,
@@ -1159,6 +1366,15 @@ async function ensureWebview(siteLabel, shouldShow = true) {
         generalAutofillEnabled: true,
         devtools: true,
       });
+
+      webviewInstance.once("tauri://created", () => {
+        syncSiteAvailability(site.label, true, "", { fromWebview: true });
+      }).catch(() => {});
+
+      webviewInstance.once("tauri://error", (event) => {
+        const message = typeof event?.payload === "string" ? event.payload : "不可访问";
+        syncSiteAvailability(site.label, false, message, { fromWebview: true });
+      }).catch(() => {});
 
       current = await waitForWebview(siteLabel);
     }
@@ -1466,23 +1682,35 @@ function renderEmptyState() {
   const card = document.createElement("div");
   card.className = "layout-empty-card";
 
-  const orbit = document.createElement("div");
-  orbit.className = "layout-empty-orbit";
+  const preview = document.createElement("div");
+  preview.className = "layout-empty-preview";
 
-  const orbitCore = document.createElement("div");
-  orbitCore.className = "layout-empty-core";
-  orbitCore.textContent = "AI";
+  const glow = document.createElement("div");
+  glow.className = "layout-empty-preview-glow";
 
-  const orbitRing = document.createElement("div");
-  orbitRing.className = "layout-empty-ring";
+  const pulse = document.createElement("div");
+  pulse.className = "layout-empty-pulse";
 
-  for (let index = 0; index < 4; index += 1) {
-    const node = document.createElement("span");
-    node.className = `layout-empty-node node-${index + 1}`;
-    orbit.appendChild(node);
+  const ringSpecs = ["ring-blue", "ring-green", "ring-cyan"];
+  for (const className of ringSpecs) {
+    const ring = document.createElement("span");
+    ring.className = `layout-empty-wave ${className}`;
+    pulse.appendChild(ring);
   }
 
-  orbit.append(orbitRing, orbitCore);
+  const core = document.createElement("div");
+  core.className = "layout-empty-pulse-core";
+
+  const coreInner = document.createElement("div");
+  coreInner.className = "layout-empty-pulse-core-inner";
+
+  const coreLabel = document.createElement("span");
+  coreLabel.className = "layout-empty-pulse-label";
+  coreLabel.textContent = "AI";
+
+  core.append(coreInner, coreLabel);
+  pulse.append(core);
+  preview.append(glow, pulse);
 
   const title = document.createElement("h2");
   title.textContent = TEXT.emptyTitle;
@@ -1517,7 +1745,7 @@ function renderEmptyState() {
   hint.className = "layout-empty-hint";
   hint.textContent = "从底部开始组装你的 AI 工作台";
 
-  card.append(orbit, title, message, steps, hint);
+  card.append(preview, title, message, steps, hint);
   container.append(card);
 }
 
@@ -1689,10 +1917,18 @@ function renderGlobalTargets() {
     const pill = document.createElement("label");
     pill.className = `target-pill${isSelected ? " active" : ""}${isUnavailable ? " unavailable" : ""}`;
     pill.dataset.siteLabel = site.label;
+    if (getContextMenuState().open && getContextMenuState().siteLabel === site.label) {
+      pill.classList.add("context-open");
+    }
     if (isUnavailable) {
       pill.title = availability?.message || "不可访问";
       pill.setAttribute("aria-label", `${site.title}，${availability?.message || "不可访问"}`);
     }
+
+    pill.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      openTargetContextMenu(site.label, event.clientX, event.clientY);
+    });
 
     const input = document.createElement("input");
     input.type = "checkbox";
@@ -1762,6 +1998,7 @@ async function handlePanelAction(action, target) {
 
 function renderWorkspace() {
   persistWorkspace();
+  persistSiteAvailability();
   syncClearSelectionButton();
   renderPageTabs();
   renderGlobalTargets();
@@ -1865,6 +2102,8 @@ async function openSiteManager() {
   renderSiteManager();
   initSortableTargets();
   syncCompactBarHeight();
+  await syncVisibleWebviews();
+  await syncVisibleToolbarWebviews();
   await refreshLayout(1);
 }
 
@@ -1903,6 +2142,8 @@ async function showCloseConfirm() {
 
   state.closeConfirm.open = true;
   modal.hidden = false;
+  await syncVisibleWebviews();
+  await syncVisibleToolbarWebviews();
 
   const acceptButton = document.querySelector("#accept-close-confirm");
   window.requestAnimationFrame(() => {
@@ -2193,6 +2434,16 @@ function wireLayoutDragging() {
   window.addEventListener("pointercancel", (event) => {
     stopHandleDrag(event.pointerId);
   });
+  window.addEventListener("pointerdown", (event) => {
+    if (!isTargetContextMenuOpen()) {
+      return;
+    }
+    const shell = document.querySelector("#target-context-menu");
+    if (shell?.contains(event.target)) {
+      return;
+    }
+    closeTargetContextMenu();
+  });
 }
 
 function wireResponsiveRelayout() {
@@ -2221,6 +2472,9 @@ function wireResponsiveRelayout() {
     if (isOnboardingOpen()) {
       renderOnboardingStep();
     }
+    if (isTargetContextMenuOpen()) {
+      positionTargetContextMenu();
+    }
   });
 }
 
@@ -2228,6 +2482,9 @@ async function fetchSites() {
   const sites = await invoke("list_sites");
   state.sites = sites;
   state.siteMap = new Map(sites.map((site) => [site.label, site]));
+  state.siteAvailability = new Map(
+    [...loadSiteAvailability().entries()].filter(([label]) => state.siteMap.has(label)),
+  );
 }
 
 function wireCloseConfirmation() {
@@ -2283,6 +2540,16 @@ async function boot() {
     await handlePanelAction(action, site);
   });
 
+  await tauriEvent.listen(SITE_AVAILABILITY_SYNC_EVENT, ({ payload }) => {
+    const label = payload?.label;
+    if (!label) {
+      return;
+    }
+    syncSiteAvailability(label, payload.available !== false, payload.message || "", { fromWebview: true });
+  });
+
+  void ensureSiteAvailability(state.workspace.visibleSiteLabels, { force: true });
+
   await refreshLayout();
   setStatus("\u9996\u6b21\u767b\u5f55\u5404 AI \u540e\uff0c\u540e\u7eed\u4f1a\u590d\u7528\u672c\u5730\u4f1a\u8bdd\u3002", "muted");
 
@@ -2321,6 +2588,21 @@ async function boot() {
       await closeSiteManager();
     }
   });
+  document.querySelector("#target-context-menu").addEventListener("click", async (event) => {
+    if (event.target?.dataset?.closeTargetContextMenu === "true") {
+      closeTargetContextMenu();
+      return;
+    }
+
+    const action = event.target?.dataset?.contextAction;
+    const siteLabel = state.targetContextMenu.siteLabel;
+    if (!action || !siteLabel) {
+      return;
+    }
+
+    closeTargetContextMenu();
+    await runTargetContextAction(action, siteLabel);
+  });
   document.querySelector("#cancel-close-confirm").addEventListener("click", async () => {
     await resolveCloseConfirm(false);
   });
@@ -2346,6 +2628,11 @@ async function boot() {
     await closeOnboarding(true);
   });
   window.addEventListener("keydown", async (event) => {
+    if (event.key === "Escape" && isTargetContextMenuOpen()) {
+      event.preventDefault();
+      closeTargetContextMenu();
+      return;
+    }
     if (event.key === "Escape" && isCloseConfirmOpen()) {
       event.preventDefault();
       await resolveCloseConfirm(false);
