@@ -14,7 +14,7 @@
 
 ChatDock 是一个基于 `Tauri + WebView2` 的 Windows 桌面应用，用来把多个 AI 对话网站放进同一个工作台里集中查看。你可以在一个窗口中同时打开多个 AI 页面，输入同一个问题，并直接对比不同服务的回答方式与结果差异。
 
-它当前采用真实网页承载和本地会话复用的方式工作，而不是走 API 聚合。这意味着你看到的是各家 AI 的实际网页体验，也意味着首次登录后，后续通常可以继续复用本地登录状态。
+它当前采用真实网页承载和本地会话复用的方式工作，而不是 API 聚合。也就是说，你看到的是各家 AI 的实际网页体验；首次登录后，后续通常可以继续复用本地登录状态。
 
 ### English
 
@@ -27,11 +27,12 @@ The current app works with real embedded web pages and local session reuse inste
 ### 中文
 
 - 单窗口并排对比多个 AI 服务
-- 每页最多显示 4 个 AI，超过后按选择顺序自动分页
+- 每页最多显示 4 个 AI，超出后按选择顺序自动分页
 - 底部统一选择 AI，并支持清空当前选择
 - 一次输入问题，统一发送到所有已选 AI
-- 各站点使用独立会话目录，便于登录状态复用
-- 提供明暗主题切换与关闭前二次确认
+- 支持图片与文件的粘贴、拖拽、注入发送
+- AI 可访问性检测、灰化提示与状态持久化
+- AI 选择项支持右键快捷操作
 
 ### English
 
@@ -39,8 +40,10 @@ The current app works with real embedded web pages and local session reuse inste
 - Show up to 4 AI panels per page with automatic pagination beyond that
 - Select targets from the bottom bar and clear the current selection when needed
 - Type one prompt and send it to all selected AI services at once
-- Keep separate session directories for each service to reuse login state
-- Includes light/dark theme support and a close confirmation flow
+- Supports pasting, dragging, and sending images and files
+- AI availability probing with grayed-out states and persisted status
+- Right-click quick actions on AI target pills
+- Includes onboarding, an about dialog, light/dark themes, and a close confirmation flow
 
 ## 支持的 AI 站点 / Supported AI Services
 
@@ -129,7 +132,9 @@ After launch, sign in inside the AI panels you want to use.
 3. 如果选择超过 4 个，应用会自动分页，你可以在顶部页签之间切换。
 4. 第一次使用时，在对应面板中分别完成登录。
 5. 在底部输入框输入问题后发送，ChatDock 会尝试把同一个问题统一发送到所有已选 AI。
-6. 如果某个站点基础可访问性探测失败，会在选择区以灰化状态提示。
+6. 如果附带图片或文件，可以直接粘贴到输入区，或者拖拽到输入区。
+7. 如果你把文件拖到某个 AI 面板上，ChatDock 会优先把文件注入到该面板对应的 WebView。
+8. 如果某个站点基础可访问性探测失败，会在底部选择区以灰化状态提示，并保留最近一次探测结果。
 
 ### English
 
@@ -138,19 +143,26 @@ After launch, sign in inside the AI panels you want to use.
 3. If you choose more than 4 services, ChatDock automatically paginates them and lets you switch pages from the top tabs.
 4. On first use, sign in inside each relevant panel.
 5. Enter a prompt in the bottom input area and send it once to all selected AI services.
-6. If a service fails the basic availability probe, its target pill is shown in a grayed-out state.
+6. If you want to include images or files, paste them into the composer or drag them onto the input area.
+7. If you drag a file onto a specific AI panel, ChatDock routes the attachment to that panel's WebView first.
+8. If a service fails the basic availability probe, its target pill is shown in a grayed-out state and the latest known status is remembered.
 
-## 当前特性 / Current Features
+## 当前功能 / Current Features
 
 ### 中文
 
 - 单窗口多 AI 对比
 - 每页最多 4 个 AI，自动分页展示
 - 底部 AI 选择、清空与顺序管理
+- AI 选择项右键菜单，支持移除与测试连通
 - 统一发送问题到所有已选 AI
-- AI 基础可访问性检测与灰化提示
+- 输入框支持图片和文件的粘贴、拖拽与列表管理
+- 支持将文件按面板命中路由到指定 AI WebView
+- AI 基础可访问性检测、灰化提示与状态持久化
+- 顶部“引导”按钮，可随时重新打开使用教程
+- 顶部“关于”弹窗，展示软件信息与仓库链接
 - 明暗主题切换
-- 关闭窗口前二次确认
+- 自定义关闭确认弹窗
 - 独立会话目录与登录复用
 
 ### English
@@ -158,11 +170,38 @@ After launch, sign in inside the AI panels you want to use.
 - Multi-AI comparison in a single window
 - Up to 4 AI panels per page with automatic pagination
 - Bottom-bar AI selection, clearing, and ordering controls
+- Right-click context actions on AI target pills for removal and connectivity testing
 - One prompt broadcast to all selected AI services
-- Basic AI availability detection with grayed-out target states
+- Composer support for image and file paste, drag-and-drop, and attachment management
+- Panel-aware file routing to a specific AI WebView
+- Basic AI availability detection with grayed-out target states and persisted status
+- A top-bar onboarding button to reopen the guided tutorial at any time
+- A top-bar about dialog with product info and repository link
 - Light and dark themes
-- Close confirmation before exiting the app
+- Custom close confirmation dialog before exiting the app
 - Independent session directories with login reuse
+
+## 新增交互能力 / Recent UX Additions
+
+### 中文
+
+- **引导系统**：首次打开可查看教程，之后也能通过顶部“引导”按钮重新查看
+- **关于弹窗**：提供软件 Logo、名称、简介与 GitHub 仓库入口
+- **关闭确认弹窗**：替换原生关闭确认，风格与应用保持一致
+- **可访问性状态记忆**：上次探测到不可访问的 AI，下次启动时会先保留该状态，再在后续检测中刷新
+- **右键菜单**：对底部 AI 选择项右键，可快速移除或手动测试连通
+- **附件支持**：输入框支持粘贴图片、粘贴文件、拖拽图片、拖拽文件
+- **按面板命中路由**：文件拖到哪个 AI 面板，就优先注入到哪个面板对应的 WebView
+
+### English
+
+- **Onboarding flow**: shown on first launch and can be reopened later from the top-bar guide button
+- **About dialog**: includes the product logo, name, brief intro, and GitHub repository link
+- **Custom close confirmation**: replaces the native close prompt with a dialog that matches the app style
+- **Persisted availability state**: unavailable AI targets keep their last known status across launches until a new probe updates them
+- **Right-click menu**: AI target pills support quick removal and manual connectivity testing
+- **Attachment support**: the composer accepts pasted images, pasted files, dragged images, and dragged files
+- **Panel-aware routing**: attachments dropped onto an AI panel are injected into that panel's WebView first
 
 ## 已知限制 / Limitations
 
@@ -172,6 +211,7 @@ After launch, sign in inside the AI panels you want to use.
 - “可访问性检测”目前是基础连通性探测，不等同于登录有效、服务可正常回复或页面已完全加载。
 - 某些 AI 站点可能因为风控、验证码、地区限制或登录失效而需要人工处理。
 - “统一发送”是尽量接近同时触发，并不是严格毫秒级同步。
+- 文件上传最终仍受各家网页自身上传控件、限制规则和加载状态影响。
 
 ### English
 
@@ -179,19 +219,20 @@ After launch, sign in inside the AI panels you want to use.
 - The current availability check is only a basic reachability probe. It does not guarantee a valid login, a ready page, or a successful response.
 - Some services may still require manual handling because of rate limits, CAPTCHA, geo restrictions, or expired sign-in state.
 - Broadcast sending is near-simultaneous in practice, not strict millisecond-level synchronization.
+- Final file upload behavior still depends on each site's own upload controls, restrictions, and loading state.
 
 ## 路线方向 / Roadmap
 
 ### 中文
 
-- 提升各站点输入与发送适配的稳定性
+- 提升各站点输入、附件注入与发送适配的稳定性
 - 完善可访问性与状态反馈
 - 打磨 Windows 发布与使用体验
 - 继续扩展工作台管理能力与站点支持
 
 ### English
 
-- Improve the stability of site-specific input and send adapters
+- Improve the stability of site-specific input, attachment injection, and send adapters
 - Expand availability checks and status feedback
 - Polish the Windows release and usage experience
 - Continue extending workspace controls and supported services
