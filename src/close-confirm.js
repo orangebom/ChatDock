@@ -4,8 +4,11 @@ export function hasBlockingOverlay({
   aboutOpen = false,
   onboardingOpen = false,
   targetContextMenuOpen = false,
+  layoutPresetsOpen = false,
+  layoutPresetDropdownOpen = false,
 } = {}) {
-  return siteManagerOpen || closeConfirmOpen || aboutOpen || onboardingOpen || targetContextMenuOpen;
+  void layoutPresetDropdownOpen;
+  return siteManagerOpen || closeConfirmOpen || aboutOpen || onboardingOpen || targetContextMenuOpen || layoutPresetsOpen;
 }
 
 export async function handleCloseRequest({

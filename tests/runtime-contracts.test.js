@@ -16,6 +16,13 @@ const releaseWorkflow = fs.readFileSync(
 );
 const mainJs = fs.readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
 const tauriLib = fs.readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+const layoutDropdownHtml = fs.readFileSync(
+  new URL("../src/layout-preset-dropdown.html", import.meta.url),
+  "utf8",
+);
+const layoutMenuHtml = fs.existsSync(new URL("../src/layout-preset-menu.html", import.meta.url))
+  ? fs.readFileSync(new URL("../src/layout-preset-menu.html", import.meta.url), "utf8")
+  : "";
 
 test("close confirm dialog contract exists in HTML", () => {
   for (const id of [
@@ -40,6 +47,72 @@ test("close confirm dialog contract exists in HTML", () => {
   }
 });
 
+test("layout preset dialog contract exists in HTML and app wiring", () => {
+  for (const fragment of [
+    'class="topbar-left"',
+    'class="topbar-center"',
+    'class="topbar-actions"',
+    'id="layout-preset-select"',
+    'id="layout-preset-current"',
+    'id="layout-preset-more"',
+    'id="layout-preset-menu"',
+    'data-layout-preset-action="save-as"',
+    'data-layout-preset-action="edit"',
+    'id="layout-presets"',
+    'id="layout-presets-list"',
+    'id="layout-preset-form"',
+    'id="layout-preset-name"',
+    'data-close-layout-presets="true"',
+  ]) {
+    assert.equal(indexHtml.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    'const LAYOUT_PRESETS_STORAGE_KEY = "chatdock-layout-presets-v1";',
+    "function loadLayoutPresets()",
+    "function persistLayoutPresets()",
+    "function renderLayoutPresets()",
+    "function renderLayoutPresetSelect()",
+    "async function ensureLayoutPresetDropdownWebview()",
+    "async function showLayoutPresetDropdownWebview()",
+    "async function hideLayoutPresetDropdownWebview()",
+    "async function ensureLayoutPresetMenuWebview()",
+    "async function showLayoutPresetMenuWebview()",
+    "async function hideLayoutPresetMenuWebview()",
+    "await current.setFocus();",
+    'payload?.action === "close"',
+    "function openLayoutPresetMenu()",
+    "async function applyLayoutPreset(presetId)",
+    "state.layoutPresets = loadLayoutPresets();",
+    'document.querySelector("#layout-preset-select").addEventListener("click"',
+    'document.querySelector("#layout-preset-more").addEventListener("click"',
+  ]) {
+    assert.equal(mainJs.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  assert.equal(indexHtml.includes("<select"), false, "layout switcher should not use native select");
+
+  for (const fragment of [
+    'id="layout-preset-dropdown-list"',
+    'layout-preset-dropdown-state',
+    'layout-preset-dropdown-action',
+    'action: "close"',
+    'data-layout-preset-id',
+  ]) {
+    assert.equal(layoutDropdownHtml.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    'id="layout-preset-menu-list"',
+    'layout-preset-menu-state',
+    'layout-preset-menu-action',
+    'data-layout-preset-action',
+    'action: "close"',
+  ]) {
+    assert.equal(layoutMenuHtml.includes(fragment), true, `missing ${fragment}`);
+  }
+});
+
 test("close confirm and unavailable target styles exist", () => {
   for (const selector of [
     ".close-confirm-card",
@@ -53,6 +126,9 @@ test("close confirm and unavailable target styles exist", () => {
     ".target-pill.context-open",
     ".context-menu",
     ".context-menu-item",
+    ".layout-presets-card",
+    ".layout-preset-item",
+    ".layout-preset-form",
     ":root[data-theme=\"light\"] .target-pill.unavailable",
   ]) {
     assert.equal(stylesCss.includes(selector), true, `missing ${selector}`);

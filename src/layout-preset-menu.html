@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>布局操作</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: rgba(20, 27, 41, 0.97);
+        --border: rgba(118, 136, 171, 0.2);
+        --text: #edf3ff;
+        --hover: rgba(173, 198, 255, 0.08);
+      }
+
+      :root[data-theme="light"] {
+        color-scheme: light;
+        --bg: rgba(255, 255, 255, 0.97);
+        --border: rgba(108, 128, 168, 0.18);
+        --text: #162844;
+        --hover: rgba(77, 142, 255, 0.1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+        font-family: "Inter", "Segoe UI", sans-serif;
+      }
+
+      .menu {
+        width: 100%;
+        min-height: 100%;
+        display: grid;
+        gap: 4px;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--bg);
+        box-shadow:
+          0 18px 34px rgba(3, 8, 16, 0.34),
+          inset 0 1px 0 rgba(255, 255, 255, 0.06);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+      }
+
+      :root[data-theme="light"] .menu {
+        box-shadow:
+          0 18px 34px rgba(156, 170, 197, 0.18),
+          inset 0 1px 0 rgba(255, 255, 255, 0.92);
+      }
+
+      .item {
+        min-height: 34px;
+        width: 100%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-start;
+        padding: 0 10px;
+        border: 0;
+        border-radius: 8px;
+        color: var(--text);
+        background: transparent;
+        font-size: 12px;
+        font-weight: 700;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .item:hover,
+      .item:focus-visible {
+        outline: none;
+        background: var(--hover);
+      }
+    </style>
+  </head>
+  <body>
+    <section id="layout-preset-menu-list" class="menu" role="menu" aria-label="布局操作">
+      <button type="button" class="item" data-layout-preset-action="save-as" role="menuitem">当前布局另存</button>
+      <button type="button" class="item" data-layout-preset-action="edit" role="menuitem">编辑布局</button>
+    </section>
+
+    <script type="module">
+      const { event } = window.__TAURI__;
+      const menu = document.querySelector("#layout-preset-menu-list");
+
+      menu.addEventListener("click", async (eventObject) => {
+        const action = eventObject.target?.dataset?.layoutPresetAction;
+        if (!action) {
+          return;
+        }
+
+        await event.emit("layout-preset-menu-action", {
+          action,
+        });
+      });
+
+      window.addEventListener("blur", () => {
+        window.setTimeout(() => {
+          void event.emit("layout-preset-menu-action", {
+            action: "close",
+          });
+        }, 120);
+      });
+
+      await event.listen("layout-preset-menu-state", ({ payload }) => {
+        document.documentElement.dataset.theme = payload?.theme === "light" ? "light" : "dark";
+      });
+    </script>
+  </body>
+</html>

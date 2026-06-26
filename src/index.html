@@ -29,7 +29,32 @@
   <body>
     <main class="shell">
       <header class="topbar">
-        <div id="page-tabs" class="page-tabs"></div>
+        <div class="topbar-left">
+          <div id="page-tabs" class="page-tabs"></div>
+        </div>
+        <div class="topbar-center">
+          <div class="layout-switcher">
+            <button
+              type="button"
+              id="layout-preset-select"
+              class="layout-preset-select"
+              aria-haspopup="listbox"
+              aria-expanded="false"
+            >
+              <span id="layout-preset-current" class="layout-preset-current">默认对比</span>
+              <span class="layout-preset-caret" aria-hidden="true">⌄</span>
+            </button>
+            <button
+              type="button"
+              id="layout-preset-more"
+              class="ghost-button layout-preset-more"
+              aria-label="布局更多操作"
+              title="布局更多操作"
+            >
+              ⋯
+            </button>
+          </div>
+        </div>
         <div class="topbar-actions">
           <div id="app-version" class="app-version topbar-version" aria-label="软件版本">--</div>
           <button type="button" id="open-onboarding" class="ghost-button" title="重新查看使用引导">引导</button>
@@ -48,6 +73,18 @@
           <button type="button" id="open-about" class="ghost-button" title="关于 ChatDock">关于</button>
         </div>
       </header>
+
+      <div id="layout-preset-menu" class="layout-preset-menu-shell" hidden>
+        <div class="layout-preset-menu-backdrop" data-close-layout-preset-menu="true"></div>
+        <section class="layout-preset-menu" role="menu" aria-label="布局操作">
+          <button type="button" class="layout-preset-menu-item" data-layout-preset-action="save-as" role="menuitem">
+            当前布局另存
+          </button>
+          <button type="button" class="layout-preset-menu-item" data-layout-preset-action="edit" role="menuitem">
+            编辑布局
+          </button>
+        </section>
+      </div>
 
       <section class="grid-preview" aria-hidden="true">
         <div id="layout-empty" class="layout-empty" hidden></div>
@@ -103,6 +140,33 @@
               </div>
               <div id="hidden-sites" class="manager-list manager-list-muted"></div>
             </section>
+          </div>
+        </section>
+      </div>
+
+      <div id="layout-presets" class="modal-shell" hidden>
+        <div class="modal-backdrop" data-close-layout-presets="true"></div>
+        <section class="modal-card layout-presets-card" role="dialog" aria-modal="true" aria-labelledby="layout-presets-title">
+          <header class="modal-header">
+            <div>
+              <h2 id="layout-presets-title">布局</h2>
+              <p>切换常用工作区，当前布局变化会自动保存到本地。</p>
+            </div>
+            <button type="button" id="close-layout-presets" class="ghost-button modal-close">关闭</button>
+          </header>
+
+          <div class="layout-presets-body">
+            <div id="layout-presets-list" class="layout-presets-list"></div>
+            <form id="layout-preset-form" class="layout-preset-form">
+              <input
+                id="layout-preset-name"
+                type="text"
+                maxlength="24"
+                placeholder="新布局名称"
+                autocomplete="off"
+              />
+              <button type="submit" class="ghost-button">另存为</button>
+            </form>
           </div>
         </section>
       </div>

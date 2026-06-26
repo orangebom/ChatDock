@@ -3,11 +3,14 @@ import { handleCloseRequest, hasBlockingOverlay } from "./close-confirm.js";
 import {
   applyAvailabilityResults,
   clearSelectionState,
+  createDefaultLayoutPresets,
   getLabelsToProbe,
   getSiteAvailability as readSiteAvailability,
   isSiteUnavailable as readSiteUnavailable,
   markAvailabilityFromWebview,
+  sanitizeLayoutPresets,
   toggleSiteSelection,
+  updateActivePresetSnapshot,
 } from "./ui-state.js";
 
 const { core, dpi, webview, window: tauriWindow, event: tauriEvent } = window.__TAURI__;
@@ -21,6 +24,7 @@ const appWindow = getCurrentWindow();
 const THEME_STORAGE_KEY = "ai-compare-theme";
 const WORKSPACE_STORAGE_KEY = "ai-compare-workspace-v2";
 const LEGACY_WORKSPACE_STORAGE_KEY = "ai-compare-workspace-v1";
+const LAYOUT_PRESETS_STORAGE_KEY = "chatdock-layout-presets-v1";
 const ONBOARDING_STORAGE_KEY = "chatdock-onboarding-v1";
 const SITE_AVAILABILITY_STORAGE_KEY = "chatdock-site-availability-v1";
 const MAX_SITES_PER_PAGE = 4;
@@ -33,6 +37,10 @@ const DEFAULT_LAYOUT_STATE = {
 };
 const PANEL_TOPBAR_HEIGHT = 34;
 const PANEL_TOOLBAR_ROUTE = "/panel-toolbar.html";
+const LAYOUT_PRESET_DROPDOWN_LABEL = "layout-preset-dropdown";
+const LAYOUT_PRESET_DROPDOWN_ROUTE = "/layout-preset-dropdown.html";
+const LAYOUT_PRESET_MENU_LABEL = "layout-preset-menu";
+const LAYOUT_PRESET_MENU_ROUTE = "/layout-preset-menu.html";
 const PROMPT_MIN_HEIGHT = 36;
 const PROMPT_MAX_HEIGHT = 116;
 const SITE_PROBE_TIMEOUT_MS = 7000;
@@ -104,6 +112,8 @@ const state = {
   themeMode: document.documentElement.dataset.themeMode || "system",
   systemThemeMedia: null,
   workspace: null,
+  layoutPresets: null,
+  isApplyingLayoutPreset: false,
   maximizedLabel: null,
   activeDrag: null,
   relayoutVersion: 0,
@@ -118,6 +128,14 @@ const state = {
     x: 0,
     y: 0,
   },
+  layoutPresetMenu: {
+    open: false,
+  },
+  layoutPresetDropdown: {
+    open: false,
+  },
+  layoutPresetDropdownWebview: null,
+  layoutPresetMenuWebview: null,
   closeConfirm: {
     open: false,
     resolver: null,
@@ -252,6 +270,31 @@ function loadWorkspace() {
   }
 }
 
+function loadLayoutPresets() {
+  try {
+    const raw = window.localStorage.getItem(LAYOUT_PRESETS_STORAGE_KEY);
+    if (raw) {
+      return sanitizeLayoutPresets(JSON.parse(raw), getAllSiteLabels(), normalizePageLayouts);
+    }
+  } catch (_error) {
+    // Fall through to defaults when local data is unreadable.
+  }
+
+  return createDefaultLayoutPresets(getAllSiteLabels(), normalizePageLayouts);
+}
+
+function persistLayoutPresets() {
+  if (!state.layoutPresets) {
+    return;
+  }
+  state.layoutPresets = sanitizeLayoutPresets(
+    state.layoutPresets,
+    getAllSiteLabels(),
+    normalizePageLayouts,
+  );
+  window.localStorage.setItem(LAYOUT_PRESETS_STORAGE_KEY, JSON.stringify(state.layoutPresets));
+}
+
 function persistWorkspace() {
   const pageCount = getPageCount();
   state.workspace.siteOrder = sanitizeSiteOrder(state.workspace.siteOrder);
@@ -265,6 +308,15 @@ function persistWorkspace() {
   state.workspace.activePageIndex = clamp(state.workspace.activePageIndex, 0, pageCount - 1);
   state.workspace.pageLayouts = normalizePageLayouts(state.workspace.pageLayouts, pageCount);
   window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(state.workspace));
+
+  if (state.layoutPresets && !state.isApplyingLayoutPreset) {
+    state.layoutPresets = updateActivePresetSnapshot(
+      state.layoutPresets,
+      state.workspace,
+      normalizePageLayouts,
+    );
+    persistLayoutPresets();
+  }
 }
 
 function sanitizeSiteOrder(order) {
@@ -474,6 +526,7 @@ function isAnyOverlayOpen() {
     aboutOpen: isAboutDialogOpen(),
     onboardingOpen: isOnboardingOpen(),
     targetContextMenuOpen: isTargetContextMenuOpen(),
+    layoutPresetsOpen: isLayoutPresetsOpen(),
   });
 }
 
@@ -1503,6 +1556,489 @@ function syncClearSelectionButton() {
   const hint = selectedCount === 0 ? "当前没有已选 AI" : "清空当前已选 AI";
   button.title = hint;
   button.setAttribute("aria-label", hint);
+}
+
+function createLayoutPresetId() {
+  return `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function getSiteTitles(labels) {
+  return labels
+    .map((label) => getSiteMeta(label)?.title || label)
+    .join("、");
+}
+
+function renderLayoutPresetSelect() {
+  const trigger = document.querySelector("#layout-preset-select");
+  const current = document.querySelector("#layout-preset-current");
+  if (!trigger || !current || !state.layoutPresets) {
+    return;
+  }
+
+  const activePreset = state.layoutPresets.items.find(
+    (preset) => preset.id === state.layoutPresets.activePresetId,
+  );
+  current.textContent = activePreset?.name || "选择布局";
+  trigger.title = activePreset ? `当前布局：${activePreset.name}` : "切换布局";
+  void syncLayoutPresetDropdownState();
+}
+
+function renderLayoutPresets() {
+  const container = document.querySelector("#layout-presets-list");
+  if (!container || !state.layoutPresets) {
+    return;
+  }
+
+  container.innerHTML = "";
+  for (const preset of state.layoutPresets.items) {
+    const item = document.createElement("article");
+    item.className = `layout-preset-item${preset.id === state.layoutPresets.activePresetId ? " active" : ""}`;
+
+    const main = document.createElement("div");
+    main.className = "layout-preset-main";
+
+    const title = document.createElement("input");
+    title.className = "layout-preset-title layout-preset-name-input";
+    title.value = preset.name;
+    title.maxLength = 24;
+    title.setAttribute("aria-label", `重命名布局 ${preset.name}`);
+    title.addEventListener("change", () => renameLayoutPreset(preset.id, title.value));
+
+    const labels = preset.snapshot?.selectedSiteLabels || [];
+    const meta = document.createElement("div");
+    meta.className = "layout-preset-meta";
+    meta.textContent = labels.length ? `${labels.length} 个 AI：${getSiteTitles(labels)}` : "空白布局";
+
+    main.append(title, meta);
+
+    const actions = document.createElement("div");
+    actions.className = "layout-preset-actions";
+
+    const applyButton = document.createElement("button");
+    applyButton.type = "button";
+    applyButton.className = "mini-button";
+    applyButton.textContent = preset.id === state.layoutPresets.activePresetId ? "当前" : "应用";
+    applyButton.disabled = preset.id === state.layoutPresets.activePresetId;
+    applyButton.addEventListener("click", async () => {
+      await applyLayoutPreset(preset.id);
+    });
+    actions.appendChild(applyButton);
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "mini-button";
+    deleteButton.textContent = "删除";
+    deleteButton.disabled = preset.builtin || state.layoutPresets.items.length <= 1;
+    deleteButton.title = preset.builtin ? "内置布局不可删除" : "删除布局";
+    deleteButton.addEventListener("click", async () => {
+      await deleteLayoutPreset(preset.id);
+    });
+    actions.appendChild(deleteButton);
+
+    item.append(main, actions);
+    container.appendChild(item);
+  }
+}
+
+function saveLayoutPresetAs(name) {
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    setStatus("请先输入布局名称。", "warn");
+    return false;
+  }
+
+  const id = createLayoutPresetId();
+  state.layoutPresets.items.push({
+    id,
+    name: trimmedName,
+    builtin: false,
+    snapshot: createDefaultLayoutPresets(getAllSiteLabels(), normalizePageLayouts).items[0].snapshot,
+  });
+  state.layoutPresets.activePresetId = id;
+  state.layoutPresets = updateActivePresetSnapshot(
+    state.layoutPresets,
+    state.workspace,
+    normalizePageLayouts,
+  );
+  persistLayoutPresets();
+  renderLayoutPresetSelect();
+  renderLayoutPresets();
+  setStatus(`已保存布局：${trimmedName}`, "ok");
+  return true;
+}
+
+function renameLayoutPreset(presetId, name) {
+  const preset = state.layoutPresets?.items?.find((item) => item.id === presetId);
+  if (!preset) {
+    return;
+  }
+
+  const nextName = name?.trim();
+  if (!nextName) {
+    renderLayoutPresets();
+    return;
+  }
+
+  preset.name = nextName.slice(0, 24);
+  persistLayoutPresets();
+  renderLayoutPresetSelect();
+  renderLayoutPresets();
+  setStatus(`布局已重命名为：${preset.name}`, "ok");
+}
+
+async function deleteLayoutPreset(presetId) {
+  if (!state.layoutPresets || state.layoutPresets.items.length <= 1) {
+    return;
+  }
+
+  const preset = state.layoutPresets.items.find((item) => item.id === presetId);
+  if (!preset || preset.builtin) {
+    return;
+  }
+
+  state.layoutPresets.items = state.layoutPresets.items.filter((item) => item.id !== presetId);
+  if (state.layoutPresets.activePresetId === presetId) {
+    state.layoutPresets.activePresetId = state.layoutPresets.items[0]?.id || null;
+  }
+  persistLayoutPresets();
+  renderLayoutPresetSelect();
+  renderLayoutPresets();
+  setStatus(`已删除布局：${preset.name}`, "ok");
+
+  if (state.layoutPresets.activePresetId && presetId === preset.id) {
+    await applyLayoutPreset(state.layoutPresets.activePresetId);
+  }
+}
+
+async function applyLayoutPreset(presetId) {
+  const preset = state.layoutPresets?.items?.find((item) => item.id === presetId);
+  if (!preset) {
+    return;
+  }
+
+  const selectedSiteLabels = (preset.snapshot?.selectedSiteLabels || []).filter((label) =>
+    state.workspace.visibleSiteLabels.includes(label),
+  );
+  const pageCount = getPageCount(selectedSiteLabels.length);
+
+  state.layoutPresets.activePresetId = preset.id;
+  state.workspace.selectedSiteLabels = selectedSiteLabels;
+  state.workspace.activePageIndex = clamp(preset.snapshot?.activePageIndex || 0, 0, pageCount - 1);
+  state.workspace.pageLayouts = normalizePageLayouts(preset.snapshot?.pageLayouts, pageCount);
+  state.maximizedLabel = null;
+  persistLayoutPresets();
+  state.isApplyingLayoutPreset = true;
+  try {
+    persistWorkspace();
+  } finally {
+    state.isApplyingLayoutPreset = false;
+  }
+
+  renderWorkspace();
+  renderLayoutPresetSelect();
+  renderLayoutPresets();
+  await refreshLayout();
+
+  const skippedCount = (preset.snapshot?.selectedSiteLabels || []).length - selectedSiteLabels.length;
+  const suffix = skippedCount > 0 ? `，${skippedCount} 个隐藏 AI 已跳过` : "";
+  setStatus(`已应用布局：${preset.name}${suffix}`, skippedCount > 0 ? "warn" : "ok");
+}
+
+async function closeLayoutPresetMenu() {
+  const shell = document.querySelector("#layout-preset-menu");
+  shell?.setAttribute("hidden", "");
+  await hideLayoutPresetMenuWebview();
+}
+
+function getLayoutPresetMenuMetrics() {
+  const trigger = document.querySelector("#layout-preset-more");
+  if (!trigger) {
+    return null;
+  }
+
+  const padding = 8;
+  const gap = 8;
+  const triggerRect = trigger.getBoundingClientRect();
+  const width = 168;
+  const height = 84;
+  const left = clamp(triggerRect.right - width, padding, Math.max(padding, window.innerWidth - width - padding));
+  const top = clamp(triggerRect.bottom + gap, padding, Math.max(padding, window.innerHeight - height - padding));
+
+  return {
+    x: left,
+    y: top,
+    width,
+    height,
+  };
+}
+
+function positionLayoutPresetMenu() {
+  void positionLayoutPresetMenuWebview();
+}
+
+function getLayoutPresetDropdownMetrics() {
+  const trigger = document.querySelector("#layout-preset-select");
+  if (!trigger || !state.layoutPresets) {
+    return null;
+  }
+
+  const padding = 8;
+  const gap = 8;
+  const rowHeight = 38;
+  const itemCount = Math.max(1, state.layoutPresets.items.length);
+  const triggerRect = trigger.getBoundingClientRect();
+  const width = Math.min(
+    Math.max(triggerRect.width, 176),
+    Math.max(176, window.innerWidth - padding * 2),
+  );
+  const height = Math.min(16 + itemCount * rowHeight + Math.max(0, itemCount - 1) * 4, 280);
+  const left = clamp(triggerRect.left, padding, Math.max(padding, window.innerWidth - width - padding));
+  const top = clamp(triggerRect.bottom + gap, padding, Math.max(padding, window.innerHeight - height - padding));
+
+  return {
+    x: left,
+    y: top,
+    width,
+    height,
+  };
+}
+
+async function toPhysicalMetrics(metrics) {
+  if (!metrics) {
+    return null;
+  }
+
+  const windowSize = await appWindow.innerSize();
+  const scaleX = windowSize.width / window.innerWidth;
+  const scaleY = windowSize.height / window.innerHeight;
+
+  return {
+    x: Math.round(metrics.x * scaleX),
+    y: Math.round(metrics.y * scaleY),
+    width: Math.round(metrics.width * scaleX),
+    height: Math.round(metrics.height * scaleY),
+  };
+}
+
+async function ensureLayoutPresetDropdownWebview() {
+  let current = state.layoutPresetDropdownWebview || (await Webview.getByLabel(LAYOUT_PRESET_DROPDOWN_LABEL));
+  const metrics = await toPhysicalMetrics(getLayoutPresetDropdownMetrics());
+
+  if (!current) {
+    new Webview(appWindow, LAYOUT_PRESET_DROPDOWN_LABEL, {
+      url: LAYOUT_PRESET_DROPDOWN_ROUTE,
+      x: metrics?.x ?? 0,
+      y: metrics?.y ?? 0,
+      width: metrics?.width ?? 180,
+      height: metrics?.height ?? 96,
+      transparent: true,
+      focus: false,
+      dragDropEnabled: false,
+      zoomHotkeysEnabled: false,
+      generalAutofillEnabled: false,
+      devtools: false,
+    });
+
+    current = await waitForWebview(LAYOUT_PRESET_DROPDOWN_LABEL);
+    await current.hide();
+  }
+
+  await current.setAutoResize(false);
+  state.layoutPresetDropdownWebview = current;
+  return current;
+}
+
+async function ensureLayoutPresetMenuWebview() {
+  let current = state.layoutPresetMenuWebview || (await Webview.getByLabel(LAYOUT_PRESET_MENU_LABEL));
+  const metrics = await toPhysicalMetrics(getLayoutPresetMenuMetrics());
+
+  if (!current) {
+    new Webview(appWindow, LAYOUT_PRESET_MENU_LABEL, {
+      url: LAYOUT_PRESET_MENU_ROUTE,
+      x: metrics?.x ?? 0,
+      y: metrics?.y ?? 0,
+      width: metrics?.width ?? 168,
+      height: metrics?.height ?? 84,
+      transparent: true,
+      focus: false,
+      dragDropEnabled: false,
+      zoomHotkeysEnabled: false,
+      generalAutofillEnabled: false,
+      devtools: false,
+    });
+
+    current = await waitForWebview(LAYOUT_PRESET_MENU_LABEL);
+    await current.hide();
+  }
+
+  await current.setAutoResize(false);
+  state.layoutPresetMenuWebview = current;
+  return current;
+}
+
+async function positionLayoutPresetDropdownWebview() {
+  if (!isLayoutPresetDropdownOpen()) {
+    return;
+  }
+
+  const current = await ensureLayoutPresetDropdownWebview();
+  const metrics = await toPhysicalMetrics(getLayoutPresetDropdownMetrics());
+  if (!metrics) {
+    await hideLayoutPresetDropdownWebview();
+    return;
+  }
+
+  await current.setPosition(new PhysicalPosition(metrics.x, metrics.y));
+  await current.setSize(new PhysicalSize(metrics.width, metrics.height));
+}
+
+async function positionLayoutPresetMenuWebview() {
+  if (!isLayoutPresetMenuOpen()) {
+    return;
+  }
+
+  const current = await ensureLayoutPresetMenuWebview();
+  const metrics = await toPhysicalMetrics(getLayoutPresetMenuMetrics());
+  if (!metrics) {
+    await hideLayoutPresetMenuWebview();
+    return;
+  }
+
+  await current.setPosition(new PhysicalPosition(metrics.x, metrics.y));
+  await current.setSize(new PhysicalSize(metrics.width, metrics.height));
+}
+
+async function syncLayoutPresetDropdownState() {
+  if (!state.layoutPresetDropdownWebview && !isLayoutPresetDropdownOpen()) {
+    return;
+  }
+
+  await ensureLayoutPresetDropdownWebview();
+  await tauriEvent.emitTo(LAYOUT_PRESET_DROPDOWN_LABEL, "layout-preset-dropdown-state", {
+    theme: state.theme,
+    activePresetId: state.layoutPresets?.activePresetId || "",
+    presets: (state.layoutPresets?.items || []).map((preset) => ({
+      id: preset.id,
+      name: preset.name,
+    })),
+  });
+}
+
+async function syncLayoutPresetMenuState() {
+  if (!state.layoutPresetMenuWebview && !isLayoutPresetMenuOpen()) {
+    return;
+  }
+
+  await ensureLayoutPresetMenuWebview();
+  await tauriEvent.emitTo(LAYOUT_PRESET_MENU_LABEL, "layout-preset-menu-state", {
+    theme: state.theme,
+  });
+}
+
+async function hideLayoutPresetDropdownWebview() {
+  const trigger = document.querySelector("#layout-preset-select");
+  const current = state.layoutPresetDropdownWebview || (await Webview.getByLabel(LAYOUT_PRESET_DROPDOWN_LABEL));
+
+  state.layoutPresetDropdown.open = false;
+  trigger?.setAttribute("aria-expanded", "false");
+
+  if (current) {
+    state.layoutPresetDropdownWebview = current;
+    await current.hide();
+  }
+}
+
+async function hideLayoutPresetMenuWebview() {
+  const current = state.layoutPresetMenuWebview || (await Webview.getByLabel(LAYOUT_PRESET_MENU_LABEL));
+
+  state.layoutPresetMenu.open = false;
+
+  if (current) {
+    state.layoutPresetMenuWebview = current;
+    await current.hide();
+  }
+}
+
+async function showLayoutPresetDropdownWebview() {
+  const trigger = document.querySelector("#layout-preset-select");
+  if (!trigger || !state.layoutPresets) {
+    return;
+  }
+
+  if (isTargetContextMenuOpen()) {
+    closeTargetContextMenu();
+  }
+  if (isLayoutPresetMenuOpen()) {
+    await closeLayoutPresetMenu();
+  }
+
+  state.layoutPresetDropdown.open = true;
+  trigger.setAttribute("aria-expanded", "true");
+
+  const current = await ensureLayoutPresetDropdownWebview();
+  await positionLayoutPresetDropdownWebview();
+  await syncLayoutPresetDropdownState();
+  await current.show();
+  await current.setFocus();
+}
+
+async function showLayoutPresetMenuWebview() {
+  const trigger = document.querySelector("#layout-preset-more");
+  if (!trigger) {
+    return;
+  }
+
+  if (isTargetContextMenuOpen()) {
+    closeTargetContextMenu();
+  }
+  if (isLayoutPresetDropdownOpen()) {
+    await closeLayoutPresetDropdown();
+  }
+
+  state.layoutPresetMenu.open = true;
+
+  const current = await ensureLayoutPresetMenuWebview();
+  await positionLayoutPresetMenuWebview();
+  await syncLayoutPresetMenuState();
+  await current.show();
+  await current.setFocus();
+}
+
+async function closeLayoutPresetDropdown() {
+  await hideLayoutPresetDropdownWebview();
+}
+
+async function openLayoutPresetDropdown() {
+  await showLayoutPresetDropdownWebview();
+}
+
+async function openLayoutPresetMenu() {
+  const shell = document.querySelector("#layout-preset-menu");
+  shell?.setAttribute("hidden", "");
+  await showLayoutPresetMenuWebview();
+}
+
+function isLayoutPresetMenuOpen() {
+  return state.layoutPresetMenu.open === true;
+}
+
+function isLayoutPresetDropdownOpen() {
+  return state.layoutPresetDropdown.open === true;
+}
+
+async function runLayoutPresetMenuAction(action) {
+  await closeLayoutPresetMenu();
+  if (action === "save-as") {
+    await openLayoutPresets();
+    const input = document.querySelector("#layout-preset-name");
+    input?.focus();
+    input?.select?.();
+    return;
+  }
+
+  if (action === "edit") {
+    await openLayoutPresets();
+  }
 }
 
 function setStatus(message, level = "muted") {
@@ -2597,6 +3133,7 @@ function renderWorkspace() {
   persistSiteAvailability();
   syncClearSelectionButton();
   renderPageTabs();
+  renderLayoutPresetSelect();
   renderGlobalTargets();
   renderSiteManager();
   initSortableTargets();
@@ -2694,6 +3231,11 @@ function isAboutDialogOpen() {
   return Boolean(modal && !modal.hidden);
 }
 
+function isLayoutPresetsOpen() {
+  const modal = document.querySelector("#layout-presets");
+  return Boolean(modal && !modal.hidden);
+}
+
 async function openSiteManager() {
   const modal = document.querySelector("#site-manager");
   if (!modal) {
@@ -2713,6 +3255,49 @@ async function closeSiteManager() {
   if (!modal) {
     return;
   }
+  modal.hidden = true;
+  await refreshLayout();
+}
+
+async function openLayoutPresets() {
+  const modal = document.querySelector("#layout-presets");
+  if (!modal) {
+    return;
+  }
+
+  if (isSiteManagerOpen()) {
+    await closeSiteManager();
+  }
+
+  if (isOnboardingOpen()) {
+    await closeOnboarding(true);
+  }
+
+  if (isTargetContextMenuOpen()) {
+    closeTargetContextMenu();
+  }
+
+  if (isLayoutPresetMenuOpen()) {
+    void closeLayoutPresetMenu();
+  }
+  if (isLayoutPresetDropdownOpen()) {
+    void closeLayoutPresetDropdown();
+  }
+
+  modal.hidden = false;
+  renderLayoutPresets();
+  syncCompactBarHeight();
+  await syncVisibleWebviews();
+  await syncVisibleToolbarWebviews();
+  await refreshLayout(1);
+}
+
+async function closeLayoutPresets() {
+  const modal = document.querySelector("#layout-presets");
+  if (!modal) {
+    return;
+  }
+
   modal.hidden = true;
   await refreshLayout();
 }
@@ -3077,14 +3662,26 @@ function wireLayoutDragging() {
     stopHandleDrag(event.pointerId);
   });
   window.addEventListener("pointerdown", (event) => {
-    if (!isTargetContextMenuOpen()) {
-      return;
+    if (isTargetContextMenuOpen()) {
+      const shell = document.querySelector("#target-context-menu");
+      if (!shell?.contains(event.target)) {
+        closeTargetContextMenu();
+      }
     }
-    const shell = document.querySelector("#target-context-menu");
-    if (shell?.contains(event.target)) {
-      return;
+
+    if (isLayoutPresetMenuOpen()) {
+      const trigger = document.querySelector("#layout-preset-more");
+      if (!trigger?.contains(event.target)) {
+        void closeLayoutPresetMenu();
+      }
     }
-    closeTargetContextMenu();
+
+    if (isLayoutPresetDropdownOpen()) {
+      const trigger = document.querySelector("#layout-preset-select");
+      if (!trigger?.contains(event.target)) {
+        void closeLayoutPresetDropdown();
+      }
+    }
   });
 }
 
@@ -3116,6 +3713,12 @@ function wireResponsiveRelayout() {
     }
     if (isTargetContextMenuOpen()) {
       positionTargetContextMenu();
+    }
+    if (isLayoutPresetMenuOpen()) {
+      void positionLayoutPresetMenuWebview();
+    }
+    if (isLayoutPresetDropdownOpen()) {
+      void positionLayoutPresetDropdownWebview();
     }
   });
 }
@@ -3167,6 +3770,7 @@ async function boot() {
   state.onboarding.completed = loadOnboardingCompleted();
   state.workspace = loadWorkspace();
   state.workspace = sanitizeWorkspace(state.workspace);
+  state.layoutPresets = loadLayoutPresets();
   persistWorkspace();
   syncCompactBarHeight();
 
@@ -3180,6 +3784,29 @@ async function boot() {
       return;
     }
     await handlePanelAction(action, site);
+  });
+
+  await tauriEvent.listen("layout-preset-dropdown-action", async ({ payload }) => {
+    if (payload?.action === "close") {
+      await closeLayoutPresetDropdown();
+      return;
+    }
+
+    if (payload?.action !== "apply" || !payload?.presetId) {
+      return;
+    }
+
+    await closeLayoutPresetDropdown();
+    await applyLayoutPreset(payload.presetId);
+  });
+
+  await tauriEvent.listen("layout-preset-menu-action", async ({ payload }) => {
+    if (payload?.action === "close") {
+      await closeLayoutPresetMenu();
+      return;
+    }
+
+    await runLayoutPresetMenuAction(payload?.action);
   });
 
   await tauriEvent.listen(SITE_AVAILABILITY_SYNC_EVENT, ({ payload }) => {
@@ -3286,6 +3913,20 @@ async function boot() {
   document.querySelector("#open-onboarding").addEventListener("click", async () => {
     await openOnboarding(true);
   });
+  document.querySelector("#layout-preset-select").addEventListener("click", async () => {
+    if (isLayoutPresetDropdownOpen()) {
+      await closeLayoutPresetDropdown();
+      return;
+    }
+    await openLayoutPresetDropdown();
+  });
+  document.querySelector("#layout-preset-more").addEventListener("click", async () => {
+    if (isLayoutPresetMenuOpen()) {
+      await closeLayoutPresetMenu();
+      return;
+    }
+    await openLayoutPresetMenu();
+  });
   document.querySelector("#open-about").addEventListener("click", async () => {
     await openAboutDialog();
   });
@@ -3307,6 +3948,34 @@ async function boot() {
     if (event.target?.dataset?.closeSiteManager === "true") {
       await closeSiteManager();
     }
+  });
+  document.querySelector("#close-layout-presets").addEventListener("click", async () => {
+    await closeLayoutPresets();
+  });
+  document.querySelector("#layout-presets").addEventListener("click", async (event) => {
+    if (event.target?.dataset?.closeLayoutPresets === "true") {
+      await closeLayoutPresets();
+    }
+  });
+  document.querySelector("#layout-preset-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = document.querySelector("#layout-preset-name");
+    if (saveLayoutPresetAs(input.value)) {
+      input.value = "";
+    }
+  });
+  document.querySelector("#layout-preset-menu").addEventListener("click", async (event) => {
+    if (event.target?.dataset?.closeLayoutPresetMenu === "true") {
+      await closeLayoutPresetMenu();
+      return;
+    }
+
+    const action = event.target?.dataset?.layoutPresetAction;
+    if (!action) {
+      return;
+    }
+
+    await runLayoutPresetMenuAction(action);
   });
   document.querySelector("#target-context-menu").addEventListener("click", async (event) => {
     if (event.target?.dataset?.closeTargetContextMenu === "true") {
@@ -3392,15 +4061,33 @@ async function boot() {
 
   await appWindow.onResized(() => {
     scheduleLayoutRefresh("window-state", [0, 120, 260, 460, 720]);
+    if (isLayoutPresetMenuOpen()) {
+      void positionLayoutPresetMenuWebview();
+    }
+    if (isLayoutPresetDropdownOpen()) {
+      void positionLayoutPresetDropdownWebview();
+    }
   });
 
   await appWindow.onScaleChanged(() => {
     scheduleLayoutRefresh("scale-change", [0, 120, 260, 460, 720]);
+    if (isLayoutPresetMenuOpen()) {
+      void positionLayoutPresetMenuWebview();
+    }
+    if (isLayoutPresetDropdownOpen()) {
+      void positionLayoutPresetDropdownWebview();
+    }
   });
 
   await appWindow.onFocusChanged(({ payload: focused }) => {
     if (focused) {
       scheduleLayoutRefresh("focus-return", [0, 120, 260]);
+      if (isLayoutPresetMenuOpen()) {
+        void positionLayoutPresetMenuWebview();
+      }
+      if (isLayoutPresetDropdownOpen()) {
+        void positionLayoutPresetDropdownWebview();
+      }
     }
   });
 

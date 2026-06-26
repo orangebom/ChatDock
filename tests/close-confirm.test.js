@@ -10,6 +10,12 @@ test("hasBlockingOverlay returns true when any modal-like layer is open", () => 
   assert.equal(hasBlockingOverlay({ aboutOpen: true }), true);
   assert.equal(hasBlockingOverlay({ onboardingOpen: true }), true);
   assert.equal(hasBlockingOverlay({ targetContextMenuOpen: true }), true);
+  assert.equal(hasBlockingOverlay({ layoutPresetsOpen: true }), true);
+});
+
+test("hasBlockingOverlay keeps layout popovers from hiding webviews", () => {
+  assert.equal(hasBlockingOverlay({ layoutPresetMenuOpen: true }), false);
+  assert.equal(hasBlockingOverlay({ layoutPresetDropdownOpen: true }), false);
 });
 
 test("handleCloseRequest cancels close when user rejects confirmation", async () => {

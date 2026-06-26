@@ -5,10 +5,14 @@ import {
   MAX_SITES_PER_PAGE,
   applyAvailabilityResults,
   clearSelectionState,
+  createPresetSnapshot,
+  createDefaultLayoutPresets,
   getLabelsToProbe,
   isSiteUnavailable,
   markAvailabilityFromWebview,
+  sanitizeLayoutPresets,
   toggleSiteSelection,
+  updateActivePresetSnapshot,
 } from "../src/ui-state.js";
 
 function normalizePageLayouts(layouts, pageCount) {
@@ -150,4 +154,84 @@ test("toggleSiteSelection returns null for hidden site", () => {
   });
 
   assert.equal(next, null);
+});
+
+test("createDefaultLayoutPresets includes image generation preset with four target AIs", () => {
+  const presets = createDefaultLayoutPresets([
+    "chatgpt",
+    "claude",
+    "gemini",
+    "doubao",
+    "zhipu",
+  ]);
+
+  const imagePreset = presets.items.find((preset) => preset.id === "image-generation");
+
+  assert.ok(imagePreset);
+  assert.equal(presets.activePresetId, "default-compare");
+  assert.deepEqual(imagePreset.snapshot.selectedSiteLabels, [
+    "chatgpt",
+    "gemini",
+    "doubao",
+    "zhipu",
+  ]);
+  assert.equal(imagePreset.snapshot.pageLayouts.length, 1);
+});
+
+test("sanitizeLayoutPresets keeps valid custom presets and repairs invalid active preset", () => {
+  const presets = sanitizeLayoutPresets(
+    {
+      activePresetId: "missing",
+      items: [
+        {
+          id: "custom",
+          name: "My Layout",
+          builtin: false,
+          snapshot: {
+            selectedSiteLabels: ["gemini", "unknown", "chatgpt", "gemini"],
+            activePageIndex: 9,
+            pageLayouts: [{ id: "page-1" }],
+          },
+        },
+      ],
+    },
+    ["chatgpt", "gemini"],
+    normalizePageLayouts,
+  );
+
+  assert.equal(presets.activePresetId, "custom");
+  assert.deepEqual(presets.items[0], {
+    id: "custom",
+    name: "My Layout",
+    builtin: false,
+    snapshot: {
+      selectedSiteLabels: ["gemini", "chatgpt"],
+      activePageIndex: 0,
+      pageLayouts: [{ id: "page-1" }],
+    },
+  });
+});
+
+test("updateActivePresetSnapshot stores current workspace into active preset", () => {
+  const workspace = {
+    selectedSiteLabels: ["chatgpt", "gemini"],
+    activePageIndex: 0,
+    pageLayouts: [{ id: "page-1" }],
+  };
+  const presets = {
+    activePresetId: "default-compare",
+    items: [
+      {
+        id: "default-compare",
+        name: "默认对比",
+        builtin: true,
+        snapshot: createPresetSnapshot({ selectedSiteLabels: [] }, normalizePageLayouts),
+      },
+    ],
+  };
+
+  const next = updateActivePresetSnapshot(presets, workspace, normalizePageLayouts);
+
+  assert.notEqual(next, presets);
+  assert.deepEqual(next.items[0].snapshot, workspace);
 });

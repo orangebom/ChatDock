@@ -220,7 +220,7 @@ const SITE_REGISTRY: [SiteConfig; 12] = [
     SiteConfig {
         label: "qwen",
         title: "Qwen",
-        url: "https://chat.qwen.ai/",
+        url: "https://www.qianwen.com/",
         data_directory: "sessions/qwen",
         accent_color: "#7a8cff",
         input_selectors: &[
