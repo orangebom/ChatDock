@@ -1,3 +1,11 @@
+import {
+  applyAvailabilityResults as applyAvailabilityResultsState,
+  getLabelsToProbe as getLabelsToProbeState,
+  getSiteAvailability as getSiteAvailabilityState,
+  isSiteUnavailable as isSiteUnavailableState,
+  markAvailabilityFromWebview as markAvailabilityFromWebviewState,
+} from "./state/availability.ts";
+
 export const MAX_SITES_PER_PAGE = 4;
 
 export const DEFAULT_LAYOUT_PRESET_ID = "default-compare";
@@ -14,12 +22,11 @@ function normalizePresetPageLayouts(layouts, pageCount) {
 }
 
 export function getSiteAvailability(siteAvailability, label) {
-  return siteAvailability.get(label) || null;
+  return getSiteAvailabilityState(siteAvailability, label);
 }
 
 export function isSiteUnavailable(siteAvailability, label) {
-  const availability = getSiteAvailability(siteAvailability, label);
-  return availability?.available === false && !availability?.verifiedByWebview;
+  return isSiteUnavailableState(siteAvailability, label);
 }
 
 export function getLabelsToProbe(
@@ -29,44 +36,16 @@ export function getLabelsToProbe(
   pendingSiteAvailability,
   options = {},
 ) {
-  const { force = false } = options;
-  const uniqueLabels = [...new Set(targetLabels)].filter((label) => siteMap.has(label));
-  if (force) {
-    return uniqueLabels.filter((label) => !pendingSiteAvailability.has(label));
-  }
-  return uniqueLabels.filter(
-    (label) => !siteAvailability.has(label) && !pendingSiteAvailability.has(label),
-  );
+  return getLabelsToProbeState(targetLabels, siteMap, siteAvailability, pendingSiteAvailability, options);
 }
 
 export function applyAvailabilityResults(labels, results, fallbackMessage = "不可访问") {
-  const resultMap = new Map(
-    (Array.isArray(results) ? results : []).map((result) => [result.label, result]),
-  );
-
-  return new Map(
-    labels.map((label) => {
-      const result = resultMap.get(label);
-      return [
-        label,
-        {
-          available: !!result?.available,
-          message: result?.message || (result ? "" : fallbackMessage),
-          verifiedByWebview: false,
-        },
-      ];
-    }),
-  );
+  return applyAvailabilityResultsState(labels, results, fallbackMessage);
 }
 
 export function markAvailabilityFromWebview(siteAvailability, label, available, message = "") {
-  const current = getSiteAvailability(siteAvailability, label);
-  return {
-    ...current,
-    available,
-    message: available ? "" : (message || current?.message || "不可访问"),
-    verifiedByWebview: true,
-  };
+  const fallbackMessage = message || "不可访问";
+  return markAvailabilityFromWebviewState(siteAvailability, label, available, fallbackMessage);
 }
 
 export function clearSelectionState(pageLayouts, normalizePageLayouts) {

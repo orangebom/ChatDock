@@ -1,0 +1,13 @@
+import { createPinia } from "pinia";
+import { createApp } from "vue";
+import App from "./App.vue";
+
+export function mountVueApp(target: Element | string = "#vue-app") {
+  const app = createApp(App);
+  const pinia = createPinia();
+
+  app.use(pinia);
+  app.mount(target);
+
+  return { app, pinia };
+}

@@ -1,13 +1,114 @@
 // @ts-nocheck
 import Sortable from "./vendor/sortable.esm.js";
+import { mountVueApp } from "./app/bootstrap";
+import { useWorkspaceStore } from "./app/stores/workspace";
 import { handleCloseRequest, hasBlockingOverlay } from "./close-confirm.js";
 import {
+  dataUrlToBase64 as composerDataUrlToBase64,
+  formatAttachmentSize as formatComposerAttachmentSize,
+  guessMimeTypeFromName as guessComposerMimeTypeFromName,
+  isImageType as isComposerImageType,
+  normalizeAttachment as normalizeComposerAttachment,
+  pathToAttachment as pathToComposerAttachment,
+  readFileAsDataUrl as readComposerFileAsDataUrl,
+  serializeAttachments as serializeComposerAttachmentPayloads,
+  uniqueAttachments as uniqueComposerAttachments,
+} from "./features/composer/attachments";
+import { renderComposerAttachmentList } from "./features/composer/composer-dom";
+import { wirePromptAttachments as wireComposerPromptAttachments } from "./features/composer/composer-events";
+import { createLayoutPresetController } from "./features/layout-presets/layout-presets-controller";
+import { createLayoutPresetOverlayController } from "./features/layout-presets/layout-preset-overlays";
+import {
+  focusElementOnNextFrame,
+  hideModalElement,
+  isModalElementOpen,
+  showModalElement,
+} from "./features/dialogs/dialogs-dom";
+import { createStandardDialogsController } from "./features/dialogs/dialogs-controller";
+import { createCloseConfirmController } from "./features/dialogs/close-confirm-controller";
+import {
+  createManagerItem as createSiteManagerItem,
+  renderSiteManagerLists,
+} from "./features/site-manager/site-manager-dom";
+import {
+  addVisibleSiteToWorkspace,
+  removeVisibleSiteFromWorkspace,
+  reorderVisibleSitesInWorkspace,
+  syncVisibleSiteOrder,
+} from "./features/site-manager/site-manager-state";
+import {
+  renderPageTabs as renderPageTabsDom,
+  renderTargetBar,
+} from "./features/site-manager/target-bar-dom";
+import { createSiteManagerController } from "./features/site-manager/site-manager-controller";
+import { createTargetContextMenuController } from "./features/site-manager/target-context-menu";
+import {
+  createOnboardingController,
+} from "./features/onboarding/onboarding";
+import { wireAppDomEvents } from "./features/app-events";
+import {
+  getPanelLayoutRects,
+  updateLayoutFromHandleDrag,
+} from "./features/panels/panel-layout";
+import {
+  renderEmptyPanelState,
+  renderLayoutHandles as renderPanelLayoutHandles,
+} from "./features/panels/panels-dom";
+import { wireResponsiveRelayout as wirePanelResponsiveRelayout } from "./features/panels/responsive-relayout";
+import { createLayoutRefreshController } from "./features/panels/layout-refresh-controller";
+import {
+  createDot as createUiDot,
+  createDragHandle as createUiDragHandle,
+  createIcon as createUiIcon,
+  createStatusDot as createUiStatusDot,
+} from "./features/ui-elements";
+import { applyThemeToDocument, resolveThemeMode } from "./features/theme";
+import {
+  getPaneMetricsFromRect,
+  getToolbarMetricsFromRect,
+  renderPanelShells,
+} from "./features/panels/panel-shells";
+import {
+  getDropdownMetricsFromRect,
+  getMenuMetricsFromRect,
+} from "./features/layout-presets/layout-presets-metrics";
+import {
   clamp,
-  clampCardPosition,
-  createRect,
   cssToPhysicalMetrics,
   physicalToViewportPosition,
 } from "./geometry.js";
+import {
+  DEFAULT_LAYOUT_STATE,
+  MAX_SITES_PER_PAGE,
+  cloneLayout as cloneWorkspaceLayout,
+  createDefaultWorkspace as createWorkspace,
+  getPageCount as getWorkspacePageCount,
+  migrateLegacyWorkspace as migrateLegacyWorkspaceState,
+  normalizePageLayouts as normalizeWorkspacePageLayouts,
+  sanitizeSiteOrder as sanitizeWorkspaceSiteOrder,
+  sanitizeVisibleSiteLabels as sanitizeWorkspaceVisibleSiteLabels,
+  sanitizeWorkspace as sanitizeWorkspaceState,
+} from "./state/workspace";
+import {
+  buildPanelToolbarState,
+  buildPanelWebviewOptions,
+  buildToolbarWebviewOptions,
+  buildToolbarUrl as buildToolbarWebviewUrl,
+  createPanelWebviewController,
+  getToolbarLabel as getToolbarWebviewLabel,
+  shouldKeepWebviewVisible,
+} from "./tauri/webview-panels";
+import {
+  buildLayoutPresetDropdownState,
+  buildLayoutPresetMenuState,
+  createOverlayWebviewController,
+} from "./tauri/overlay-webviews";
+import { wireTauriAppEvents } from "./tauri/app-events";
+import { wireWindowLayoutEvents } from "./tauri/window-events";
+import {
+  loadSiteAvailability as loadSiteAvailabilityState,
+  persistSiteAvailability as persistSiteAvailabilityState,
+} from "./state/availability.ts";
 import {
   applyAvailabilityResults,
   clearSelectionState,
@@ -29,22 +130,22 @@ const { Webview } = webview;
 const { getCurrentWindow } = tauriWindow;
 
 const appWindow = getCurrentWindow();
+let workspaceStore = null;
+let onboardingController = null;
+let layoutPresetController = null;
+let layoutPresetOverlayController = null;
+let targetContextMenuController = null;
+let standardDialogsController = null;
+let siteManagerController = null;
+let closeConfirmController = null;
+let layoutRefreshController = null;
 const THEME_STORAGE_KEY = "ai-compare-theme";
 const WORKSPACE_STORAGE_KEY = "ai-compare-workspace-v2";
 const LEGACY_WORKSPACE_STORAGE_KEY = "ai-compare-workspace-v1";
 const LAYOUT_PRESETS_STORAGE_KEY = "chatdock-layout-presets-v1";
 const ONBOARDING_STORAGE_KEY = "chatdock-onboarding-v1";
 const SITE_AVAILABILITY_STORAGE_KEY = "chatdock-site-availability-v1";
-const MAX_SITES_PER_PAGE = 4;
-
-const DEFAULT_LAYOUT_STATE = {
-  twoWaySplit: 0.5,
-  threeWaySplits: [1 / 3, 2 / 3],
-  quadCols: 0.5,
-  quadRows: 0.5,
-};
 const PANEL_TOPBAR_HEIGHT = 34;
-const PANEL_TOOLBAR_ROUTE = "/panel-toolbar.html";
 const LAYOUT_PRESET_DROPDOWN_LABEL = "layout-preset-dropdown";
 const LAYOUT_PRESET_DROPDOWN_ROUTE = "/layout-preset-dropdown.html";
 const LAYOUT_PRESET_MENU_LABEL = "layout-preset-menu";
@@ -149,7 +250,6 @@ const state = {
     resolver: null,
   },
   composerAttachments: [],
-  promptDropDepth: 0,
   panelDropTarget: null,
   onboarding: {
     open: false,
@@ -163,29 +263,11 @@ function sleep(ms) {
 }
 
 function cloneLayout(layout) {
-  const source = layout || DEFAULT_LAYOUT_STATE;
-  return {
-    twoWaySplit: clamp(Number(source.twoWaySplit) || DEFAULT_LAYOUT_STATE.twoWaySplit, 0.2, 0.8),
-    threeWaySplits: Array.isArray(source.threeWaySplits) && source.threeWaySplits.length === 2
-      ? [
-          clamp(Number(source.threeWaySplits[0]) || DEFAULT_LAYOUT_STATE.threeWaySplits[0], 0.18, 0.7),
-          clamp(Number(source.threeWaySplits[1]) || DEFAULT_LAYOUT_STATE.threeWaySplits[1], 0.3, 0.82),
-        ]
-      : [...DEFAULT_LAYOUT_STATE.threeWaySplits],
-    quadCols: clamp(Number(source.quadCols) || DEFAULT_LAYOUT_STATE.quadCols, 0.24, 0.76),
-    quadRows: clamp(Number(source.quadRows) || DEFAULT_LAYOUT_STATE.quadRows, 0.24, 0.76),
-  };
+  return cloneWorkspaceLayout(layout);
 }
 
 function createDefaultWorkspace() {
-  const siteOrder = getAllSiteLabels();
-  return {
-    activePageIndex: 0,
-    siteOrder,
-    visibleSiteLabels: siteOrder,
-    selectedSiteLabels: [],
-    pageLayouts: [cloneLayout()],
-  };
+  return createWorkspace(getAllSiteLabels());
 }
 
 function getAllSiteLabels() {
@@ -193,67 +275,19 @@ function getAllSiteLabels() {
 }
 
 function getPageCount(selectedCount = state.workspace?.selectedSiteLabels.length || 0) {
-  return Math.max(1, Math.ceil(selectedCount / MAX_SITES_PER_PAGE));
+  return getWorkspacePageCount(selectedCount);
 }
 
 function normalizePageLayouts(rawLayouts, pageCount) {
-  const layouts = Array.isArray(rawLayouts) ? rawLayouts.map((layout) => cloneLayout(layout)) : [];
-  while (layouts.length < pageCount) {
-    layouts.push(cloneLayout());
-  }
-  return layouts.slice(0, pageCount);
+  return normalizeWorkspacePageLayouts(rawLayouts, pageCount);
 }
 
 function migrateLegacyWorkspace(rawWorkspace) {
-  const selectedFromLegacy = Array.isArray(rawWorkspace?.selectedSiteLabels)
-    ? rawWorkspace.selectedSiteLabels
-    : [];
-  const layoutsFromLegacy = Array.isArray(rawWorkspace?.pages)
-    ? rawWorkspace.pages.map((page) => page?.layout)
-    : rawWorkspace?.pageLayouts;
-
-  return {
-    activePageIndex: 0,
-    siteOrder: getAllSiteLabels(),
-    visibleSiteLabels: getAllSiteLabels(),
-    selectedSiteLabels: selectedFromLegacy,
-    pageLayouts: layoutsFromLegacy,
-  };
+  return migrateLegacyWorkspaceState(rawWorkspace, getAllSiteLabels());
 }
 
 function sanitizeWorkspace(rawWorkspace) {
-  const validSiteLabels = new Set(getAllSiteLabels());
-  const rawOrder = Array.isArray(rawWorkspace?.siteOrder) ? rawWorkspace.siteOrder : [];
-  const dedupedOrder = rawOrder.filter(
-    (label, index, source) => validSiteLabels.has(label) && source.indexOf(label) === index,
-  );
-  const missingLabels = getAllSiteLabels().filter((label) => !dedupedOrder.includes(label));
-  const siteOrder = [...dedupedOrder, ...missingLabels];
-  const visibleSiteLabels = Array.isArray(rawWorkspace?.visibleSiteLabels)
-    ? rawWorkspace.visibleSiteLabels.filter(
-        (label, index, source) => siteOrder.includes(label) && source.indexOf(label) === index,
-      )
-    : [...siteOrder];
-  const selectedSiteLabels = Array.isArray(rawWorkspace?.selectedSiteLabels)
-    ? rawWorkspace.selectedSiteLabels.filter(
-        (label, index, source) => visibleSiteLabels.includes(label) && source.indexOf(label) === index,
-      )
-    : [];
-
-  const pageCount = getPageCount(selectedSiteLabels.length);
-  const activePageIndex = clamp(
-    Number.isInteger(rawWorkspace?.activePageIndex) ? rawWorkspace.activePageIndex : 0,
-    0,
-    pageCount - 1,
-  );
-
-  return {
-    activePageIndex,
-    siteOrder,
-    visibleSiteLabels,
-    selectedSiteLabels,
-    pageLayouts: normalizePageLayouts(rawWorkspace?.pageLayouts, pageCount),
-  };
+  return sanitizeWorkspaceState(rawWorkspace, getAllSiteLabels());
 }
 
 function loadWorkspace() {
@@ -324,21 +358,11 @@ function persistWorkspace() {
 }
 
 function sanitizeSiteOrder(order) {
-  const validLabels = new Set(getAllSiteLabels());
-  const rawOrder = Array.isArray(order) ? order : [];
-  const dedupedOrder = rawOrder.filter(
-    (label, index, source) => validLabels.has(label) && source.indexOf(label) === index,
-  );
-  const missingLabels = getAllSiteLabels().filter((label) => !dedupedOrder.includes(label));
-  return [...dedupedOrder, ...missingLabels];
+  return sanitizeWorkspaceSiteOrder(order, getAllSiteLabels());
 }
 
 function sanitizeVisibleSiteLabels(visibleLabels, siteOrder = state.workspace?.siteOrder || getAllSiteLabels()) {
-  const validOrder = sanitizeSiteOrder(siteOrder);
-  const rawVisible = Array.isArray(visibleLabels) ? visibleLabels : validOrder;
-  return rawVisible.filter(
-    (label, index, source) => validOrder.includes(label) && source.indexOf(label) === index,
-  );
+  return sanitizeWorkspaceVisibleSiteLabels(visibleLabels, siteOrder, getAllSiteLabels());
 }
 
 function getOrderedSites() {
@@ -454,61 +478,17 @@ function loadOnboardingCompleted() {
   }
 }
 
-function sanitizeAvailabilityRecord(label, value) {
-  if (!label || typeof value !== "object" || value === null) {
-    return null;
-  }
-
-  return {
-    available: value.available === true,
-    message: value.available === true ? "" : (typeof value.message === "string" && value.message) || "不可访问",
-    verifiedByWebview: value.verifiedByWebview === true,
-    checkedAt: Number.isFinite(value.checkedAt) ? value.checkedAt : null,
-  };
-}
-
 function loadSiteAvailability() {
-  try {
-    const raw = window.localStorage.getItem(SITE_AVAILABILITY_STORAGE_KEY);
-    if (!raw) {
-      return new Map();
-    }
-
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
-      return new Map();
-    }
-
-    return new Map(
-      Object.entries(parsed)
-        .map(([label, value]) => [label, sanitizeAvailabilityRecord(label, value)])
-        .filter((entry) => entry[1]),
-    );
-  } catch (_error) {
-    return new Map();
-  }
+  return loadSiteAvailabilityState(window.localStorage, SITE_AVAILABILITY_STORAGE_KEY);
 }
 
 function persistSiteAvailability() {
-  const payload = Object.fromEntries(
-    [...state.siteAvailability.entries()]
-      .filter(([label]) => state.siteMap.has(label))
-      .map(([label, value]) => [
-        label,
-        {
-          available: value.available === true,
-          message: value.available === true ? "" : value.message || "不可访问",
-          verifiedByWebview: value.verifiedByWebview === true,
-          checkedAt: Number.isFinite(value.checkedAt) ? value.checkedAt : Date.now(),
-        },
-      ]),
+  persistSiteAvailabilityState(
+    window.localStorage,
+    SITE_AVAILABILITY_STORAGE_KEY,
+    state.siteAvailability,
+    new Set(state.siteMap.keys()),
   );
-
-  try {
-    window.localStorage.setItem(SITE_AVAILABILITY_STORAGE_KEY, JSON.stringify(payload));
-  } catch (_error) {
-    // Ignore storage errors and continue.
-  }
 }
 
 function persistOnboardingCompleted() {
@@ -531,73 +511,19 @@ function isAnyOverlayOpen() {
 }
 
 function getContextMenuState() {
-  return state.targetContextMenu;
+  return targetContextMenuController?.getState() || state.targetContextMenu;
 }
 
 function closeTargetContextMenu() {
-  const shell = document.querySelector("#target-context-menu");
-  const menu = shell?.querySelector(".context-menu");
-  const activePill = state.targetContextMenu.siteLabel
-    ? document.querySelector(`.target-pill[data-site-label="${state.targetContextMenu.siteLabel}"]`)
-    : null;
-
-  shell && (shell.hidden = true);
-  menu?.style.removeProperty("left");
-  menu?.style.removeProperty("top");
-  activePill?.classList.remove("context-open");
-
-  state.targetContextMenu.open = false;
-  state.targetContextMenu.siteLabel = null;
-  state.targetContextMenu.x = 0;
-  state.targetContextMenu.y = 0;
-  void syncVisibleWebviews();
-  void syncVisibleToolbarWebviews();
+  targetContextMenuController?.close();
 }
 
 function positionTargetContextMenu() {
-  const shell = document.querySelector("#target-context-menu");
-  const menu = shell?.querySelector(".context-menu");
-  if (!shell || !menu || shell.hidden) {
-    return;
-  }
-
-  const padding = 10;
-  const width = menu.offsetWidth || 156;
-  const height = menu.offsetHeight || 94;
-  const left = clamp(state.targetContextMenu.x, padding, Math.max(padding, window.innerWidth - width - padding));
-  const top = clamp(state.targetContextMenu.y, padding, Math.max(padding, window.innerHeight - height - padding));
-
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
+  targetContextMenuController?.position();
 }
 
 function openTargetContextMenu(siteLabel, x, y) {
-  const site = getSiteMeta(siteLabel);
-  const shell = document.querySelector("#target-context-menu");
-  const title = document.querySelector("#target-context-title");
-  if (!site || !shell || !title) {
-    return;
-  }
-
-  const previousPill = state.targetContextMenu.siteLabel
-    ? document.querySelector(`.target-pill[data-site-label="${state.targetContextMenu.siteLabel}"]`)
-    : null;
-  previousPill?.classList.remove("context-open");
-
-  state.targetContextMenu.open = true;
-  state.targetContextMenu.siteLabel = siteLabel;
-  state.targetContextMenu.x = x;
-  state.targetContextMenu.y = y;
-
-  title.textContent = `${site.title} 操作`;
-  shell.hidden = false;
-
-  const nextPill = document.querySelector(`.target-pill[data-site-label="${siteLabel}"]`);
-  nextPill?.classList.add("context-open");
-
-  positionTargetContextMenu();
-  void syncVisibleWebviews();
-  void syncVisibleToolbarWebviews();
+  targetContextMenuController?.open(siteLabel, x, y);
 }
 
 async function runTargetContextAction(action, siteLabel) {
@@ -627,237 +553,27 @@ async function runTargetContextAction(action, siteLabel) {
 }
 
 function isOnboardingOpen() {
-  const shell = document.querySelector("#onboarding");
-  return Boolean(shell && !shell.hidden);
-}
-
-function getOnboardingStep() {
-  return ONBOARDING_STEPS[state.onboarding.stepIndex] || ONBOARDING_STEPS[0];
-}
-
-function getViewportPadding() {
-  return 20;
-}
-
-function getTargetRect(selector) {
-  if (!selector) {
-    return null;
-  }
-  const element = document.querySelector(selector);
-  if (!element) {
-    return null;
-  }
-  const rect = element.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) {
-    return null;
-  }
-  return rect;
+  return onboardingController?.isOpen() === true;
 }
 
 function isTargetContextMenuOpen() {
-  const shell = document.querySelector("#target-context-menu");
-  return Boolean(shell && !shell.hidden);
-}
-
-function updateOnboardingFocus(step) {
-  const focus = document.querySelector("#tour-focus");
-  const shadeTop = document.querySelector(".tour-shade-top");
-  const shadeLeft = document.querySelector(".tour-shade-left");
-  const shadeRight = document.querySelector(".tour-shade-right");
-  const shadeBottom = document.querySelector(".tour-shade-bottom");
-  if (!focus) {
-    return;
-  }
-
-  const rect = getTargetRect(step.target);
-  if (!rect) {
-    focus.hidden = true;
-    if (shadeTop) {
-      shadeTop.style.top = "0";
-      shadeTop.style.left = "0";
-      shadeTop.style.width = "100%";
-      shadeTop.style.height = "100%";
-    }
-    if (shadeLeft) {
-      shadeLeft.style.width = "0";
-      shadeLeft.style.height = "0";
-    }
-    if (shadeRight) {
-      shadeRight.style.width = "0";
-      shadeRight.style.height = "0";
-    }
-    if (shadeBottom) {
-      shadeBottom.style.width = "0";
-      shadeBottom.style.height = "0";
-    }
-    return;
-  }
-
-  const padding = 10;
-  const viewportPadding = getViewportPadding();
-  const focusLeft = Math.max(viewportPadding, rect.left - padding);
-  const focusTop = Math.max(viewportPadding, rect.top - padding);
-  const focusWidth = Math.min(window.innerWidth - viewportPadding * 2, rect.width + padding * 2);
-  const focusHeight = Math.min(window.innerHeight - viewportPadding * 2, rect.height + padding * 2);
-  const focusRight = Math.min(window.innerWidth - viewportPadding, focusLeft + focusWidth);
-  const focusBottom = Math.min(window.innerHeight - viewportPadding, focusTop + focusHeight);
-
-  focus.hidden = false;
-  focus.style.left = `${focusLeft}px`;
-  focus.style.top = `${focusTop}px`;
-  focus.style.width = `${Math.max(0, focusRight - focusLeft)}px`;
-  focus.style.height = `${Math.max(0, focusBottom - focusTop)}px`;
-
-  if (shadeTop) {
-    shadeTop.style.left = "0";
-    shadeTop.style.top = "0";
-    shadeTop.style.width = "100%";
-    shadeTop.style.height = `${Math.max(0, focusTop)}px`;
-  }
-
-  if (shadeLeft) {
-    shadeLeft.style.left = "0";
-    shadeLeft.style.top = `${focusTop}px`;
-    shadeLeft.style.width = `${Math.max(0, focusLeft)}px`;
-    shadeLeft.style.height = `${Math.max(0, focusBottom - focusTop)}px`;
-  }
-
-  if (shadeRight) {
-    shadeRight.style.left = `${focusRight}px`;
-    shadeRight.style.top = `${focusTop}px`;
-    shadeRight.style.width = `${Math.max(0, window.innerWidth - focusRight)}px`;
-    shadeRight.style.height = `${Math.max(0, focusBottom - focusTop)}px`;
-  }
-
-  if (shadeBottom) {
-    shadeBottom.style.left = "0";
-    shadeBottom.style.top = `${focusBottom}px`;
-    shadeBottom.style.width = "100%";
-    shadeBottom.style.height = `${Math.max(0, window.innerHeight - focusBottom)}px`;
-  }
-}
-
-function updateOnboardingCardPosition(step) {
-  const card = document.querySelector("#tour-card");
-  const targetRect = getTargetRect(step.target);
-  if (!card) {
-    return;
-  }
-
-  const cardRect = card.getBoundingClientRect();
-  const padding = 20;
-  let left = (window.innerWidth - cardRect.width) / 2;
-  let top = (window.innerHeight - cardRect.height) / 2;
-
-  if (targetRect) {
-    const centeredLeft = targetRect.left + targetRect.width / 2 - cardRect.width / 2;
-    left = clampCardPosition(centeredLeft, cardRect.width, window.innerWidth, padding);
-
-    if (step.placement === "top") {
-      top = targetRect.top - cardRect.height - 18;
-      if (top < padding) {
-        top = clampCardPosition(targetRect.bottom + 18, cardRect.height, window.innerHeight, padding);
-      }
-    } else if (step.placement === "bottom") {
-      top = targetRect.bottom + 18;
-      if (top + cardRect.height > window.innerHeight - padding) {
-        top = clampCardPosition(targetRect.top - cardRect.height - 18, cardRect.height, window.innerHeight, padding);
-      }
-    } else {
-      top = clampCardPosition(
-        targetRect.top + targetRect.height / 2 - cardRect.height / 2,
-        cardRect.height,
-        window.innerHeight,
-        padding,
-      );
-    }
-  }
-
-  card.style.left = `${clampCardPosition(left, cardRect.width, window.innerWidth, padding)}px`;
-  card.style.top = `${clampCardPosition(top, cardRect.height, window.innerHeight, padding)}px`;
+  return targetContextMenuController?.isOpen() === true;
 }
 
 function renderOnboardingStep() {
-  const shell = document.querySelector("#onboarding");
-  const title = document.querySelector("#tour-title");
-  const body = document.querySelector("#tour-body");
-  const progress = document.querySelector("#tour-progress");
-  const dots = document.querySelector("#tour-dots");
-  const prev = document.querySelector("#tour-prev");
-  const next = document.querySelector("#tour-next");
-
-  if (!shell || shell.hidden || !title || !body || !progress || !dots || !prev || !next) {
-    return;
-  }
-
-  const step = getOnboardingStep();
-  const total = ONBOARDING_STEPS.length;
-  const current = state.onboarding.stepIndex + 1;
-
-  title.textContent = step.title;
-  body.textContent = step.body;
-  progress.textContent = `${current} / ${total}`;
-  prev.disabled = state.onboarding.stepIndex === 0;
-  next.textContent = current === total ? "完成" : "下一步";
-
-  dots.innerHTML = "";
-  ONBOARDING_STEPS.forEach((_, index) => {
-    const dot = document.createElement("span");
-    dot.className = `tour-dot${index === state.onboarding.stepIndex ? " active" : ""}`;
-    dots.append(dot);
-  });
-
-  updateOnboardingFocus(step);
-  window.requestAnimationFrame(() => {
-    updateOnboardingCardPosition(step);
-  });
+  onboardingController?.render();
 }
 
 async function openOnboarding(resetToFirst = false) {
-  const shell = document.querySelector("#onboarding");
-  if (!shell) {
-    return;
-  }
-  if (isSiteManagerOpen()) {
-    await closeSiteManager();
-  }
-  if (resetToFirst) {
-    state.onboarding.stepIndex = 0;
-  }
-  state.onboarding.open = true;
-  shell.hidden = false;
-  renderOnboardingStep();
-  await syncVisibleWebviews();
-  await syncVisibleToolbarWebviews();
-  await refreshLayout(1);
+  await onboardingController?.open(resetToFirst);
 }
 
 async function closeOnboarding(markCompleted = false) {
-  const shell = document.querySelector("#onboarding");
-  if (!shell) {
-    return;
-  }
-  shell.hidden = true;
-  state.onboarding.open = false;
-  if (markCompleted) {
-    state.onboarding.completed = true;
-    persistOnboardingCompleted();
-  }
-  await refreshLayout();
+  await onboardingController?.close(markCompleted);
 }
 
 async function stepOnboarding(direction) {
-  const nextIndex = clamp(
-    state.onboarding.stepIndex + direction,
-    0,
-    ONBOARDING_STEPS.length - 1,
-  );
-  if (nextIndex === state.onboarding.stepIndex) {
-    return;
-  }
-  state.onboarding.stepIndex = nextIndex;
-  renderOnboardingStep();
-  await refreshLayout(1);
+  await onboardingController?.step(direction);
 }
 
 function autosizePrompt() {
@@ -878,51 +594,23 @@ function createAttachmentId() {
 }
 
 function isImageType(file) {
-  return Boolean(file?.type && file.type.startsWith("image/"));
+  return isComposerImageType(file);
 }
 
 function formatAttachmentSize(size) {
-  if (!Number.isFinite(size) || size <= 0) {
-    return "0 B";
-  }
-
-  const units = ["B", "KB", "MB", "GB"];
-  let value = size;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-
-  const digits = value >= 10 || unitIndex === 0 ? 0 : 1;
-  return `${value.toFixed(digits)} ${units[unitIndex]}`;
+  return formatComposerAttachmentSize(size);
 }
 
 function dataUrlToBase64(dataUrl) {
-  const commaIndex = dataUrl.indexOf(",");
-  return commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : dataUrl;
+  return composerDataUrlToBase64(dataUrl);
 }
 
 function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
-    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
-    reader.readAsDataURL(file);
-  });
+  return readComposerFileAsDataUrl(file);
 }
 
 async function normalizeAttachment(file) {
-  const dataUrl = await readFileAsDataUrl(file);
-  return {
-    id: createAttachmentId(),
-    name: file.name || "attachment",
-    type: file.type || "application/octet-stream",
-    size: Number(file.size) || 0,
-    kind: isImageType(file) ? "image" : "file",
-    previewUrl: isImageType(file) ? dataUrl : "",
-    base64: dataUrlToBase64(dataUrl),
-  };
+  return normalizeComposerAttachment(file);
 }
 
 function renderComposerAttachments() {
@@ -932,58 +620,11 @@ function renderComposerAttachments() {
     return;
   }
 
-  const attachments = state.composerAttachments;
-  container.innerHTML = "";
-  container.hidden = attachments.length === 0;
-  dropzone.dataset.hasAttachments = attachments.length > 0 ? "true" : "false";
-
-  for (const attachment of attachments) {
-    const item = document.createElement("div");
-    item.className = `prompt-attachment prompt-attachment-${attachment.kind}`;
-    item.dataset.attachmentId = attachment.id;
-
-    const thumb = document.createElement("div");
-    thumb.className = "prompt-attachment-thumb";
-    if (attachment.kind === "image" && attachment.previewUrl) {
-      const image = document.createElement("img");
-      image.src = attachment.previewUrl;
-      image.alt = attachment.name;
-      thumb.append(image);
-    } else {
-      const badge = document.createElement("span");
-      badge.className = "prompt-attachment-ext";
-      const extension = attachment.name.includes(".")
-        ? attachment.name.split(".").pop()
-        : "FILE";
-      badge.textContent = (extension || "FILE").slice(0, 4).toUpperCase();
-      thumb.append(badge);
-    }
-
-    const meta = document.createElement("div");
-    meta.className = "prompt-attachment-meta";
-
-    const name = document.createElement("div");
-    name.className = "prompt-attachment-name";
-    name.textContent = attachment.name;
-
-    const info = document.createElement("div");
-    info.className = "prompt-attachment-info";
-    info.textContent = `${attachment.kind === "image" ? "图片" : "文件"} · ${formatAttachmentSize(attachment.size)}`;
-
-    meta.append(name, info);
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "prompt-attachment-remove";
-    remove.dataset.removeAttachment = attachment.id;
-    remove.setAttribute("aria-label", `移除 ${attachment.name}`);
-    remove.title = `移除 ${attachment.name}`;
-    remove.textContent = "×";
-
-    item.append(thumb, meta, remove);
-    container.append(item);
-  }
-
+  renderComposerAttachmentList({
+    container,
+    dropzone,
+    attachments: state.composerAttachments,
+  });
   syncCompactBarHeight();
 }
 
@@ -1020,116 +661,15 @@ function clearDragVisualState() {
 }
 
 function resetPromptDropState() {
-  state.promptDropDepth = 0;
   setPromptDropActive(false);
 }
 
-function collectFilesFromItems(items) {
-  const files = [];
-  if (!items) {
-    return files;
-  }
-
-  for (const item of Array.from(items)) {
-    if (!item || item.kind !== "file") {
-      continue;
-    }
-    const file = item.getAsFile?.();
-    if (file) {
-      files.push(file);
-    }
-  }
-  return files;
-}
-
-function hasDraggedFiles(dataTransfer) {
-  if (!dataTransfer) {
-    return false;
-  }
-
-  if (Number(dataTransfer.files?.length) > 0) {
-    return true;
-  }
-
-  const itemList = Array.from(dataTransfer.items || []);
-  if (itemList.some((item) => item?.kind === "file")) {
-    return true;
-  }
-
-  return Array.from(dataTransfer.types || []).includes("Files");
-}
-
-function describeDragTransfer(dataTransfer) {
-  if (!dataTransfer) {
-    return {
-      hasTransfer: false,
-      files: 0,
-      items: [],
-      types: [],
-    };
-  }
-
-  return {
-    hasTransfer: true,
-    files: Number(dataTransfer.files?.length) || 0,
-    items: Array.from(dataTransfer.items || []).map((item) => ({
-      kind: item?.kind || "",
-      type: item?.type || "",
-    })),
-    types: Array.from(dataTransfer.types || []),
-  };
-}
-
 function guessMimeTypeFromName(name) {
-  const lowerName = String(name || "").toLowerCase();
-  if (lowerName.endsWith(".png")) return "image/png";
-  if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) return "image/jpeg";
-  if (lowerName.endsWith(".gif")) return "image/gif";
-  if (lowerName.endsWith(".webp")) return "image/webp";
-  if (lowerName.endsWith(".bmp")) return "image/bmp";
-  if (lowerName.endsWith(".svg")) return "image/svg+xml";
-  if (lowerName.endsWith(".pdf")) return "application/pdf";
-  if (lowerName.endsWith(".txt")) return "text/plain";
-  if (lowerName.endsWith(".md")) return "text/markdown";
-  if (lowerName.endsWith(".json")) return "application/json";
-  if (lowerName.endsWith(".csv")) return "text/csv";
-  if (lowerName.endsWith(".doc")) return "application/msword";
-  if (lowerName.endsWith(".docx")) {
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  }
-  if (lowerName.endsWith(".xls")) return "application/vnd.ms-excel";
-  if (lowerName.endsWith(".xlsx")) {
-    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  }
-  if (lowerName.endsWith(".ppt")) return "application/vnd.ms-powerpoint";
-  if (lowerName.endsWith(".pptx")) {
-    return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-  }
-  if (lowerName.endsWith(".zip")) return "application/zip";
-  return "application/octet-stream";
+  return guessComposerMimeTypeFromName(name);
 }
 
 async function pathToAttachment(path) {
-  const name = String(path || "").split(/[/\\\\]/).pop() || "attachment";
-  const bytes = await invoke("read_file_bytes", { path });
-  const uint8 = Uint8Array.from(bytes || []);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let index = 0; index < uint8.length; index += chunkSize) {
-    const chunk = uint8.subarray(index, index + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  const type = guessMimeTypeFromName(name);
-  const base64 = btoa(binary);
-  return {
-    id: createAttachmentId(),
-    name,
-    type,
-    size: uint8.length,
-    kind: type.startsWith("image/") ? "image" : "file",
-    previewUrl: type.startsWith("image/") ? `data:${type};base64,${base64}` : "",
-    base64,
-  };
+  return pathToComposerAttachment(path, (targetPath) => invoke("read_file_bytes", { path: targetPath }));
 }
 
 async function appendComposerPaths(paths) {
@@ -1147,17 +687,7 @@ async function appendComposerPaths(paths) {
 }
 
 function uniqueAttachments(existing, incoming) {
-  const seen = new Set(existing.map((item) => `${item.name}::${item.size}::${item.type}::${item.base64}`));
-  const next = [...existing];
-  for (const item of incoming) {
-    const key = `${item.name}::${item.size}::${item.type}::${item.base64}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    next.push(item);
-  }
-  return next;
+  return uniqueComposerAttachments(existing, incoming);
 }
 
 async function appendComposerFiles(files) {
@@ -1195,13 +725,7 @@ function clearComposerAttachments() {
 }
 
 function serializeComposerAttachments() {
-  return state.composerAttachments.map((attachment) => ({
-    name: attachment.name,
-    mimeType: attachment.type,
-    size: attachment.size,
-    kind: attachment.kind,
-    base64: attachment.base64,
-  }));
+  return serializeComposerAttachmentPayloads(state.composerAttachments);
 }
 
 async function serializeAttachmentsFromPaths(paths) {
@@ -1211,13 +735,7 @@ async function serializeAttachmentsFromPaths(paths) {
   }
 
   const attachments = await Promise.all(validPaths.map((path) => pathToAttachment(path)));
-  return attachments.map((attachment) => ({
-    name: attachment.name,
-    mimeType: attachment.type,
-    size: attachment.size,
-    kind: attachment.kind,
-    base64: attachment.base64,
-  }));
+  return serializeComposerAttachmentPayloads(attachments);
 }
 
 function findPanelDropTarget(position) {
@@ -1336,123 +854,14 @@ async function ensureWebviewDropListener(siteLabel, webviewInstance) {
 }
 
 function wirePromptAttachments() {
-  const promptField = document.querySelector("#prompt");
-  const dropzone = document.querySelector("#prompt-dropzone");
-  const attachments = document.querySelector("#prompt-attachments");
-  const compactBar = document.querySelector(".compact-bar");
-  if (!promptField || !dropzone || !attachments || !compactBar) {
-    return;
-  }
-
-  attachments.addEventListener("click", (event) => {
-    const button = event.target?.closest?.("[data-remove-attachment]");
-    if (!button) {
-      return;
-    }
-    removeComposerAttachment(button.dataset.removeAttachment);
+  wireComposerPromptAttachments({
+    appendFiles: appendComposerFiles,
+    clearDragVisualState,
+    renderAttachments: renderComposerAttachments,
+    removeAttachment: removeComposerAttachment,
+    setPromptDropActive,
+    setStatus,
   });
-
-  promptField.addEventListener("paste", async (event) => {
-    const files = collectFilesFromItems(event.clipboardData?.items);
-    if (!files.length) {
-      return;
-    }
-
-    event.preventDefault();
-    try {
-      const count = await appendComposerFiles(files);
-      if (count > 0) {
-        setStatus(`??? ${count} ????`, "ok");
-      }
-    } catch (error) {
-      console.error(error);
-      setStatus(`???????${error}`, "fail");
-    }
-  });
-
-  const logDragEvent = (eventName, event, accepted = null) => {
-    console.info("[drag-debug]", eventName, {
-      accepted,
-      targetId: event.target?.id || "",
-      targetClass: event.target?.className || "",
-      currentTargetId: event.currentTarget?.id || "",
-      currentTargetClass: event.currentTarget?.className || "",
-      transfer: describeDragTransfer(event.dataTransfer),
-    });
-  };
-
-  const markDrag = (event, eventName = "drag") => {
-    const accepted = hasDraggedFiles(event.dataTransfer);
-    logDragEvent(eventName, event, accepted);
-    if (!accepted) {
-      return false;
-    }
-    event.preventDefault();
-    return true;
-  };
-
-  const handleDragEnter = (event) => {
-    if (!markDrag(event, "dragenter")) {
-      return;
-    }
-    state.promptDropDepth += 1;
-    setPromptDropActive(true);
-  };
-
-  const handleDragOver = (event) => {
-    if (!markDrag(event, "dragover")) {
-      return;
-    }
-    event.dataTransfer.dropEffect = "copy";
-    setPromptDropActive(true);
-  };
-
-  const handleDragLeave = (event) => {
-    const accepted = hasDraggedFiles(event.dataTransfer);
-    logDragEvent("dragleave", event, accepted);
-    if (!accepted) {
-      return;
-    }
-    event.preventDefault();
-    state.promptDropDepth = Math.max(0, state.promptDropDepth - 1);
-    if (state.promptDropDepth === 0 || event.currentTarget === event.target) {
-      setPromptDropActive(false);
-    }
-  };
-
-  const handleDrop = async (event) => {
-    if (!markDrag(event, "drop")) {
-      return;
-    }
-    clearDragVisualState();
-    const files = Array.from(event.dataTransfer?.files || []);
-    console.info("[drag-debug]", "drop-files", files.map((file) => ({
-      name: file.name,
-      type: file.type,
-      size: file.size,
-    })));
-    if (!files.length) {
-      return;
-    }
-    try {
-      const count = await appendComposerFiles(files);
-      if (count > 0) {
-        setStatus(`??? ${count} ????`, "ok");
-      }
-    } catch (error) {
-      console.error(error);
-      setStatus(`???????${error}`, "fail");
-    }
-  };
-
-  for (const node of [compactBar, dropzone, promptField]) {
-    node.addEventListener("dragenter", handleDragEnter);
-    node.addEventListener("dragover", handleDragOver);
-    node.addEventListener("dragleave", handleDragLeave);
-    node.addEventListener("drop", handleDrop);
-  }
-
-  renderComposerAttachments();
 }
 async function renderAppVersion() {
   const versionNode = document.querySelector("#app-version");
@@ -1543,195 +952,41 @@ function syncClearSelectionButton() {
   button.setAttribute("aria-label", hint);
 }
 
-function createLayoutPresetId() {
-  return `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
 function getSiteTitles(labels) {
   return labels
     .map((label) => getSiteMeta(label)?.title || label)
     .join("、");
 }
 
-function renderLayoutPresetSelect() {
-  const trigger = document.querySelector("#layout-preset-select");
-  const current = document.querySelector("#layout-preset-current");
-  if (!trigger || !current || !state.layoutPresets) {
-    return;
-  }
+function getSiteTitle(label) {
+  return layoutPresetController?.getSiteTitle(label) || getSiteMeta(label)?.title || label;
+}
 
-  const activePreset = state.layoutPresets.items.find(
-    (preset) => preset.id === state.layoutPresets.activePresetId,
-  );
-  current.textContent = activePreset?.name || "选择布局";
-  trigger.title = activePreset ? `当前布局：${activePreset.name}` : "切换布局";
-  void syncLayoutPresetDropdownState();
+function renderLayoutPresetSelect() {
+  layoutPresetController?.renderSelect();
 }
 
 function renderLayoutPresets() {
-  const container = document.querySelector("#layout-presets-list");
-  if (!container || !state.layoutPresets) {
-    return;
-  }
-
-  container.innerHTML = "";
-  for (const preset of state.layoutPresets.items) {
-    const item = document.createElement("article");
-    item.className = `layout-preset-item${preset.id === state.layoutPresets.activePresetId ? " active" : ""}`;
-
-    const main = document.createElement("div");
-    main.className = "layout-preset-main";
-
-    const title = document.createElement("input");
-    title.className = "layout-preset-title layout-preset-name-input";
-    title.value = preset.name;
-    title.maxLength = 24;
-    title.setAttribute("aria-label", `重命名布局 ${preset.name}`);
-    title.addEventListener("change", () => renameLayoutPreset(preset.id, title.value));
-
-    const labels = preset.snapshot?.selectedSiteLabels || [];
-    const meta = document.createElement("div");
-    meta.className = "layout-preset-meta";
-    meta.textContent = labels.length ? `${labels.length} 个 AI：${getSiteTitles(labels)}` : "空白布局";
-
-    main.append(title, meta);
-
-    const actions = document.createElement("div");
-    actions.className = "layout-preset-actions";
-
-    const applyButton = document.createElement("button");
-    applyButton.type = "button";
-    applyButton.className = "mini-button";
-    applyButton.textContent = preset.id === state.layoutPresets.activePresetId ? "当前" : "应用";
-    applyButton.disabled = preset.id === state.layoutPresets.activePresetId;
-    applyButton.addEventListener("click", async () => {
-      await applyLayoutPreset(preset.id);
-    });
-    actions.appendChild(applyButton);
-
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    deleteButton.className = "mini-button";
-    deleteButton.textContent = "删除";
-    deleteButton.disabled = preset.builtin || state.layoutPresets.items.length <= 1;
-    deleteButton.title = preset.builtin ? "内置布局不可删除" : "删除布局";
-    deleteButton.addEventListener("click", async () => {
-      await deleteLayoutPreset(preset.id);
-    });
-    actions.appendChild(deleteButton);
-
-    item.append(main, actions);
-    container.appendChild(item);
-  }
+  layoutPresetController?.renderList();
 }
 
 function saveLayoutPresetAs(name) {
-  const trimmedName = name.trim();
-  if (!trimmedName) {
-    setStatus("请先输入布局名称。", "warn");
-    return false;
-  }
-
-  const id = createLayoutPresetId();
-  state.layoutPresets.items.push({
-    id,
-    name: trimmedName,
-    builtin: false,
-    snapshot: createDefaultLayoutPresets(getAllSiteLabels(), normalizePageLayouts).items[0].snapshot,
-  });
-  state.layoutPresets.activePresetId = id;
-  state.layoutPresets = updateActivePresetSnapshot(
-    state.layoutPresets,
-    state.workspace,
-    normalizePageLayouts,
-  );
-  persistLayoutPresets();
-  renderLayoutPresetSelect();
-  renderLayoutPresets();
-  setStatus(`已保存布局：${trimmedName}`, "ok");
-  return true;
+  return layoutPresetController?.saveAs(name) || false;
 }
 
 function renameLayoutPreset(presetId, name) {
-  const preset = state.layoutPresets?.items?.find((item) => item.id === presetId);
-  if (!preset) {
-    return;
-  }
-
-  const nextName = name?.trim();
-  if (!nextName) {
-    renderLayoutPresets();
-    return;
-  }
-
-  preset.name = nextName.slice(0, 24);
-  persistLayoutPresets();
-  renderLayoutPresetSelect();
-  renderLayoutPresets();
-  setStatus(`布局已重命名为：${preset.name}`, "ok");
+  layoutPresetController?.rename(presetId, name);
 }
 
 async function deleteLayoutPreset(presetId) {
-  if (!state.layoutPresets || state.layoutPresets.items.length <= 1) {
-    return;
-  }
-
-  const preset = state.layoutPresets.items.find((item) => item.id === presetId);
-  if (!preset || preset.builtin) {
-    return;
-  }
-
-  state.layoutPresets.items = state.layoutPresets.items.filter((item) => item.id !== presetId);
-  if (state.layoutPresets.activePresetId === presetId) {
-    state.layoutPresets.activePresetId = state.layoutPresets.items[0]?.id || null;
-  }
-  persistLayoutPresets();
-  renderLayoutPresetSelect();
-  renderLayoutPresets();
-  setStatus(`已删除布局：${preset.name}`, "ok");
-
-  if (state.layoutPresets.activePresetId && presetId === preset.id) {
-    await applyLayoutPreset(state.layoutPresets.activePresetId);
-  }
+  await layoutPresetController?.remove(presetId);
 }
 
 async function applyLayoutPreset(presetId) {
-  const preset = state.layoutPresets?.items?.find((item) => item.id === presetId);
-  if (!preset) {
-    return;
-  }
-
-  const selectedSiteLabels = (preset.snapshot?.selectedSiteLabels || []).filter((label) =>
-    state.workspace.visibleSiteLabels.includes(label),
-  );
-  const pageCount = getPageCount(selectedSiteLabels.length);
-
-  state.layoutPresets.activePresetId = preset.id;
-  state.workspace.selectedSiteLabels = selectedSiteLabels;
-  state.workspace.activePageIndex = clamp(preset.snapshot?.activePageIndex || 0, 0, pageCount - 1);
-  state.workspace.pageLayouts = normalizePageLayouts(preset.snapshot?.pageLayouts, pageCount);
-  state.maximizedLabel = null;
-  persistLayoutPresets();
-  state.isApplyingLayoutPreset = true;
-  try {
-    persistWorkspace();
-  } finally {
-    state.isApplyingLayoutPreset = false;
-  }
-
-  renderWorkspace();
-  renderLayoutPresetSelect();
-  renderLayoutPresets();
-  await refreshLayout();
-
-  const skippedCount = (preset.snapshot?.selectedSiteLabels || []).length - selectedSiteLabels.length;
-  const suffix = skippedCount > 0 ? `，${skippedCount} 个隐藏 AI 已跳过` : "";
-  setStatus(`已应用布局：${preset.name}${suffix}`, skippedCount > 0 ? "warn" : "ok");
+  await layoutPresetController?.apply(presetId);
 }
 
 async function closeLayoutPresetMenu() {
-  const shell = document.querySelector("#layout-preset-menu");
-  shell?.setAttribute("hidden", "");
   await hideLayoutPresetMenuWebview();
 }
 
@@ -1741,20 +996,10 @@ function getLayoutPresetMenuMetrics() {
     return null;
   }
 
-  const padding = 8;
-  const gap = 8;
-  const triggerRect = trigger.getBoundingClientRect();
-  const width = 168;
-  const height = 84;
-  const left = clamp(triggerRect.right - width, padding, Math.max(padding, window.innerWidth - width - padding));
-  const top = clamp(triggerRect.bottom + gap, padding, Math.max(padding, window.innerHeight - height - padding));
-
-  return {
-    x: left,
-    y: top,
-    width,
-    height,
-  };
+  return getMenuMetricsFromRect(trigger.getBoundingClientRect(), {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
 }
 
 function positionLayoutPresetMenu() {
@@ -1767,25 +1012,11 @@ function getLayoutPresetDropdownMetrics() {
     return null;
   }
 
-  const padding = 8;
-  const gap = 8;
-  const rowHeight = 38;
   const itemCount = Math.max(1, state.layoutPresets.items.length);
-  const triggerRect = trigger.getBoundingClientRect();
-  const width = Math.min(
-    Math.max(triggerRect.width, 176),
-    Math.max(176, window.innerWidth - padding * 2),
-  );
-  const height = Math.min(16 + itemCount * rowHeight + Math.max(0, itemCount - 1) * 4, 280);
-  const left = clamp(triggerRect.left, padding, Math.max(padding, window.innerWidth - width - padding));
-  const top = clamp(triggerRect.bottom + gap, padding, Math.max(padding, window.innerHeight - height - padding));
-
-  return {
-    x: left,
-    y: top,
-    width,
-    height,
-  };
+  return getDropdownMetricsFromRect(trigger.getBoundingClientRect(), itemCount, {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
 }
 
 async function toPhysicalMetrics(metrics) {
@@ -1796,188 +1027,109 @@ async function toPhysicalMetrics(metrics) {
   });
 }
 
+const layoutPresetDropdownOverlay = createOverlayWebviewController({
+  appWindow,
+  Webview,
+  label: LAYOUT_PRESET_DROPDOWN_LABEL,
+  route: LAYOUT_PRESET_DROPDOWN_ROUTE,
+  fallbackSize: { width: 180, height: 96 },
+  getCached: () => state.layoutPresetDropdownWebview,
+  setCached: (current) => {
+    state.layoutPresetDropdownWebview = current;
+  },
+  getByLabel: (label) => Webview.getByLabel(label),
+  waitForWebview,
+  getMetrics: getLayoutPresetDropdownMetrics,
+  toPhysicalMetrics,
+  isOpen: isLayoutPresetDropdownOpen,
+  onHide: () => {
+    const trigger = document.querySelector("#layout-preset-select");
+    state.layoutPresetDropdown.open = false;
+    trigger?.setAttribute("aria-expanded", "false");
+  },
+  createPosition: (x, y) => new PhysicalPosition(x, y),
+  createSize: (width, height) => new PhysicalSize(width, height),
+  emitTo: (label, eventName, payload) => tauriEvent.emitTo(label, eventName, payload),
+  eventName: "layout-preset-dropdown-state",
+  getPayload: () => buildLayoutPresetDropdownState(state.theme, state.layoutPresets),
+});
+
+const layoutPresetMenuOverlay = createOverlayWebviewController({
+  appWindow,
+  Webview,
+  label: LAYOUT_PRESET_MENU_LABEL,
+  route: LAYOUT_PRESET_MENU_ROUTE,
+  fallbackSize: { width: 168, height: 84 },
+  getCached: () => state.layoutPresetMenuWebview,
+  setCached: (current) => {
+    state.layoutPresetMenuWebview = current;
+  },
+  getByLabel: (label) => Webview.getByLabel(label),
+  waitForWebview,
+  getMetrics: getLayoutPresetMenuMetrics,
+  toPhysicalMetrics,
+  isOpen: isLayoutPresetMenuOpen,
+  onHide: () => {
+    state.layoutPresetMenu.open = false;
+  },
+  createPosition: (x, y) => new PhysicalPosition(x, y),
+  createSize: (width, height) => new PhysicalSize(width, height),
+  emitTo: (label, eventName, payload) => tauriEvent.emitTo(label, eventName, payload),
+  eventName: "layout-preset-menu-state",
+  getPayload: () => buildLayoutPresetMenuState(state.theme),
+});
+
+layoutPresetOverlayController = createLayoutPresetOverlayController({
+  document,
+  state,
+  overlays: {
+    dropdown: layoutPresetDropdownOverlay,
+    menu: layoutPresetMenuOverlay,
+  },
+  actions: {
+    isTargetContextMenuOpen,
+    closeTargetContextMenu,
+  },
+});
+
 async function ensureLayoutPresetDropdownWebview() {
-  let current = state.layoutPresetDropdownWebview || (await Webview.getByLabel(LAYOUT_PRESET_DROPDOWN_LABEL));
-  const metrics = await toPhysicalMetrics(getLayoutPresetDropdownMetrics());
-
-  if (!current) {
-    new Webview(appWindow, LAYOUT_PRESET_DROPDOWN_LABEL, {
-      url: LAYOUT_PRESET_DROPDOWN_ROUTE,
-      x: metrics?.x ?? 0,
-      y: metrics?.y ?? 0,
-      width: metrics?.width ?? 180,
-      height: metrics?.height ?? 96,
-      transparent: true,
-      focus: false,
-      dragDropEnabled: false,
-      zoomHotkeysEnabled: false,
-      generalAutofillEnabled: false,
-      devtools: false,
-    });
-
-    current = await waitForWebview(LAYOUT_PRESET_DROPDOWN_LABEL);
-    await current.hide();
-  }
-
-  await current.setAutoResize(false);
-  state.layoutPresetDropdownWebview = current;
-  return current;
+  return layoutPresetOverlayController.ensureDropdown();
 }
 
 async function ensureLayoutPresetMenuWebview() {
-  let current = state.layoutPresetMenuWebview || (await Webview.getByLabel(LAYOUT_PRESET_MENU_LABEL));
-  const metrics = await toPhysicalMetrics(getLayoutPresetMenuMetrics());
-
-  if (!current) {
-    new Webview(appWindow, LAYOUT_PRESET_MENU_LABEL, {
-      url: LAYOUT_PRESET_MENU_ROUTE,
-      x: metrics?.x ?? 0,
-      y: metrics?.y ?? 0,
-      width: metrics?.width ?? 168,
-      height: metrics?.height ?? 84,
-      transparent: true,
-      focus: false,
-      dragDropEnabled: false,
-      zoomHotkeysEnabled: false,
-      generalAutofillEnabled: false,
-      devtools: false,
-    });
-
-    current = await waitForWebview(LAYOUT_PRESET_MENU_LABEL);
-    await current.hide();
-  }
-
-  await current.setAutoResize(false);
-  state.layoutPresetMenuWebview = current;
-  return current;
+  return layoutPresetOverlayController.ensureMenu();
 }
 
 async function positionLayoutPresetDropdownWebview() {
-  if (!isLayoutPresetDropdownOpen()) {
-    return;
-  }
-
-  const current = await ensureLayoutPresetDropdownWebview();
-  const metrics = await toPhysicalMetrics(getLayoutPresetDropdownMetrics());
-  if (!metrics) {
-    await hideLayoutPresetDropdownWebview();
-    return;
-  }
-
-  await current.setPosition(new PhysicalPosition(metrics.x, metrics.y));
-  await current.setSize(new PhysicalSize(metrics.width, metrics.height));
+  await layoutPresetOverlayController.positionDropdown();
 }
 
 async function positionLayoutPresetMenuWebview() {
-  if (!isLayoutPresetMenuOpen()) {
-    return;
-  }
-
-  const current = await ensureLayoutPresetMenuWebview();
-  const metrics = await toPhysicalMetrics(getLayoutPresetMenuMetrics());
-  if (!metrics) {
-    await hideLayoutPresetMenuWebview();
-    return;
-  }
-
-  await current.setPosition(new PhysicalPosition(metrics.x, metrics.y));
-  await current.setSize(new PhysicalSize(metrics.width, metrics.height));
+  await layoutPresetOverlayController.positionMenu();
 }
 
 async function syncLayoutPresetDropdownState() {
-  if (!state.layoutPresetDropdownWebview && !isLayoutPresetDropdownOpen()) {
-    return;
-  }
-
-  await ensureLayoutPresetDropdownWebview();
-  await tauriEvent.emitTo(LAYOUT_PRESET_DROPDOWN_LABEL, "layout-preset-dropdown-state", {
-    theme: state.theme,
-    activePresetId: state.layoutPresets?.activePresetId || "",
-    presets: (state.layoutPresets?.items || []).map((preset) => ({
-      id: preset.id,
-      name: preset.name,
-    })),
-  });
+  await layoutPresetOverlayController.syncDropdown();
 }
 
 async function syncLayoutPresetMenuState() {
-  if (!state.layoutPresetMenuWebview && !isLayoutPresetMenuOpen()) {
-    return;
-  }
-
-  await ensureLayoutPresetMenuWebview();
-  await tauriEvent.emitTo(LAYOUT_PRESET_MENU_LABEL, "layout-preset-menu-state", {
-    theme: state.theme,
-  });
+  await layoutPresetOverlayController.syncMenu();
 }
 
 async function hideLayoutPresetDropdownWebview() {
-  const trigger = document.querySelector("#layout-preset-select");
-  const current = state.layoutPresetDropdownWebview || (await Webview.getByLabel(LAYOUT_PRESET_DROPDOWN_LABEL));
-
-  state.layoutPresetDropdown.open = false;
-  trigger?.setAttribute("aria-expanded", "false");
-
-  if (current) {
-    state.layoutPresetDropdownWebview = current;
-    await current.hide();
-  }
+  await layoutPresetOverlayController.hideDropdown();
 }
 
 async function hideLayoutPresetMenuWebview() {
-  const current = state.layoutPresetMenuWebview || (await Webview.getByLabel(LAYOUT_PRESET_MENU_LABEL));
-
-  state.layoutPresetMenu.open = false;
-
-  if (current) {
-    state.layoutPresetMenuWebview = current;
-    await current.hide();
-  }
+  await layoutPresetOverlayController.hideMenu();
 }
 
 async function showLayoutPresetDropdownWebview() {
-  const trigger = document.querySelector("#layout-preset-select");
-  if (!trigger || !state.layoutPresets) {
-    return;
-  }
-
-  if (isTargetContextMenuOpen()) {
-    closeTargetContextMenu();
-  }
-  if (isLayoutPresetMenuOpen()) {
-    await closeLayoutPresetMenu();
-  }
-
-  state.layoutPresetDropdown.open = true;
-  trigger.setAttribute("aria-expanded", "true");
-
-  const current = await ensureLayoutPresetDropdownWebview();
-  await positionLayoutPresetDropdownWebview();
-  await syncLayoutPresetDropdownState();
-  await current.show();
-  await current.setFocus();
+  await layoutPresetOverlayController.openDropdown();
 }
 
 async function showLayoutPresetMenuWebview() {
-  const trigger = document.querySelector("#layout-preset-more");
-  if (!trigger) {
-    return;
-  }
-
-  if (isTargetContextMenuOpen()) {
-    closeTargetContextMenu();
-  }
-  if (isLayoutPresetDropdownOpen()) {
-    await closeLayoutPresetDropdown();
-  }
-
-  state.layoutPresetMenu.open = true;
-
-  const current = await ensureLayoutPresetMenuWebview();
-  await positionLayoutPresetMenuWebview();
-  await syncLayoutPresetMenuState();
-  await current.show();
-  await current.setFocus();
+  await layoutPresetOverlayController.openMenu();
 }
 
 async function closeLayoutPresetDropdown() {
@@ -1989,41 +1141,44 @@ async function openLayoutPresetDropdown() {
 }
 
 async function openLayoutPresetMenu() {
-  const shell = document.querySelector("#layout-preset-menu");
-  shell?.setAttribute("hidden", "");
   await showLayoutPresetMenuWebview();
 }
 
 function isLayoutPresetMenuOpen() {
-  return state.layoutPresetMenu.open === true;
+  return layoutPresetOverlayController?.isMenuOpen() === true;
 }
 
 function isLayoutPresetDropdownOpen() {
-  return state.layoutPresetDropdown.open === true;
+  return layoutPresetOverlayController?.isDropdownOpen() === true;
 }
 
 async function runLayoutPresetMenuAction(action) {
-  await closeLayoutPresetMenu();
-  if (action === "save-as") {
-    await openLayoutPresets();
-    const input = document.querySelector("#layout-preset-name");
-    input?.focus();
-    input?.select?.();
-    return;
-  }
-
-  if (action === "edit") {
-    await openLayoutPresets();
-  }
+  await layoutPresetController?.runMenuAction(action);
 }
 
 function setStatus(message, level = "muted") {
   const status = document.querySelector("#status");
   if (!status) {
+    syncVueBridgeState({ status: { message, level } });
     return;
   }
   status.dataset.level = level;
   status.textContent = message;
+  syncVueBridgeState({ status: { message, level } });
+}
+
+function syncVueBridgeState(patch = {}) {
+  if (!workspaceStore) {
+    return;
+  }
+
+  workspaceStore.hydrate({
+    sites: state.sites,
+    workspace: state.workspace,
+    layoutPresets: state.layoutPresets,
+    themeMode: state.themeMode,
+    ...patch,
+  });
 }
 
 function logAttachmentDebug(stage, payload = {}) {
@@ -2050,35 +1205,13 @@ function getSystemTheme() {
 }
 
 function resolveTheme(themeMode = state.themeMode) {
-  return themeMode === "system" ? getSystemTheme() : themeMode;
+  return resolveThemeMode(themeMode, getSystemTheme);
 }
 
 function applyTheme(themeMode = state.themeMode) {
-  const resolvedTheme = resolveTheme(themeMode);
-  state.themeMode = themeMode;
-  state.theme = resolvedTheme;
-  document.documentElement.dataset.theme = resolvedTheme;
-  document.documentElement.dataset.themeMode = themeMode;
-  document.documentElement.style.colorScheme = resolvedTheme;
-
-  const toggle = document.querySelector("#theme-toggle");
-  const toggleLabel = document.querySelector("#theme-toggle-label");
-  const nextTheme = resolvedTheme === "dark" ? "light" : "dark";
-  const themeText = themeMode === "system" ? "\u8ddf\u968f\u7cfb\u7edf" : resolvedTheme === "dark" ? "\u6697\u8272" : "\u4eae\u8272";
-
-  if (toggle) {
-    const themeHint = themeMode === "system"
-      ? `当前跟随系统，点击切换到${nextTheme === "light" ? "亮色" : "暗色"}主题`
-      : nextTheme === "light"
-        ? "切换到亮色主题"
-        : "切换到暗色主题";
-    toggle.setAttribute("aria-label", themeHint);
-    toggle.setAttribute("title", themeHint);
-  }
-
-  if (toggleLabel) {
-    toggleLabel.textContent = themeText;
-  }
+  const nextTheme = applyThemeToDocument(document, themeMode, getSystemTheme);
+  state.themeMode = nextTheme.themeMode;
+  state.theme = nextTheme.theme;
 }
 
 function setTheme(themeMode) {
@@ -2110,66 +1243,15 @@ function wireSystemThemeWatcher() {
 }
 
 function createIcon(kind) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-
-  const segments =
-    kind === "reload"
-      ? ["M20 11a8 8 0 1 1-2.34-5.66", "M20 4v6h-6"]
-      : kind === "layout"
-        ? [
-            "M12 3v18",
-            "M3 12h18",
-            "M3 7h18",
-            "M3 17h18",
-          ]
-        : kind === "clear"
-          ? [
-              "M4 7h16",
-              "M9 7V5.5h6V7",
-              "M7 7l1 12h8l1-12",
-              "M10 11v5",
-              "M14 11v5",
-            ]
-          : kind === "edit"
-            ? [
-                "M4 20l4.2-1 9.3-9.3-3.2-3.2L5 15.8 4 20",
-                "M13.6 5.4l3.2 3.2",
-              ]
-      : kind === "restore"
-        ? [
-            "M7 4.8H4.8V7",
-            "M13 4.8h2.2V7",
-            "M15.2 13v2.2H13",
-            "M7 15.2H4.8V13",
-            "M8.2 8.2h3.6v3.6H8.2z",
-          ]
-        : kind === "maximize"
-          ? ["M7 4.8H4.8V7", "M13 4.8h2.2V7", "M15.2 13v2.2H13", "M7 15.2H4.8V13"]
-          : ["M5.2 5.2l9.6 9.6", "M14.8 5.2l-9.6 9.6"];
-
-  for (const segment of segments) {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", segment);
-    svg.appendChild(path);
-  }
-
-  return svg;
+  return createUiIcon(document, kind);
 }
 
 function createDot(accentColor) {
-  const dot = document.createElement("span");
-  dot.className = "dot";
-  dot.style.background = accentColor;
-  return dot;
+  return createUiDot(document, accentColor);
 }
 
 function createStatusDot(accentColor) {
-  const dot = document.createElement("span");
-  dot.className = "status-dot";
-  dot.style.background = accentColor;
-  return dot;
+  return createUiStatusDot(document, accentColor);
 }
 
 async function ensureSiteAvailability(targetLabels = state.workspace?.visibleSiteLabels || [], options = {}) {
@@ -2227,58 +1309,12 @@ async function ensureSiteAvailability(targetLabels = state.workspace?.visibleSit
 }
 
 function createDragHandle() {
-  const handle = document.createElement("div");
-  handle.className = "manager-drag-handle";
-  handle.setAttribute("role", "button");
-  handle.setAttribute("tabindex", "0");
-  handle.setAttribute("aria-label", "拖动排序");
-  handle.setAttribute("title", "拖动排序");
-
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 16 16");
-  svg.setAttribute("aria-hidden", "true");
-
-  const dots = [
-    [5, 4],
-    [5, 8],
-    [5, 12],
-    [11, 4],
-    [11, 8],
-    [11, 12],
-  ];
-
-  for (const [cx, cy] of dots) {
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("cx", String(cx));
-    circle.setAttribute("cy", String(cy));
-    circle.setAttribute("r", "1.2");
-    svg.appendChild(circle);
-  }
-
-  handle.append(svg);
-  return handle;
-}
-
-function createPanelShell(site) {
-  const article = document.createElement("article");
-  article.className = "panel-shell";
-  article.dataset.panel = site.label;
-
-  const body = document.createElement("div");
-  body.className = "panel-body";
-  body.dataset.webviewHost = site.label;
-
-  article.append(body);
-  return article;
+  return createUiDragHandle(document);
 }
 
 function ensurePanelShells() {
   const layer = document.querySelector("#panel-layer");
-  layer.innerHTML = "";
-
-  for (const site of state.sites) {
-    layer.appendChild(createPanelShell(site));
-  }
+  renderPanelShells({ document, layer, sites: state.sites });
 }
 
 function getPanelElement(label) {
@@ -2302,12 +1338,7 @@ function paneMetrics(label) {
   }
 
   const rect = panel.getBoundingClientRect();
-  return {
-    x: rect.left,
-    y: rect.top + PANEL_TOPBAR_HEIGHT,
-    width: rect.width,
-    height: Math.max(0, rect.height - PANEL_TOPBAR_HEIGHT),
-  };
+  return getPaneMetricsFromRect(rect, PANEL_TOPBAR_HEIGHT);
 }
 
 function panelToolbarMetrics(label) {
@@ -2317,12 +1348,7 @@ function panelToolbarMetrics(label) {
   }
 
   const rect = panel.getBoundingClientRect();
-  return {
-    x: rect.left,
-    y: rect.top,
-    width: rect.width,
-    height: PANEL_TOPBAR_HEIGHT,
-  };
+  return getToolbarMetricsFromRect(rect, PANEL_TOPBAR_HEIGHT);
 }
 
 async function panePhysicalMetrics(label) {
@@ -2374,263 +1400,112 @@ async function waitForWebview(label, timeoutMs = 12000) {
 }
 
 function getToolbarLabel(siteLabel) {
-  return `${siteLabel}-toolbar`;
+  return getToolbarWebviewLabel(siteLabel);
 }
 
 function buildToolbarUrl(site) {
-  const params = new URLSearchParams({
-    site: site.label,
-    title: site.title,
-    accent: site.accentColor,
-  });
-  return `${PANEL_TOOLBAR_ROUTE}?${params.toString()}`;
+  return buildToolbarWebviewUrl(site);
 }
 
 async function waitForToolbarWebview(label, timeoutMs = 12000) {
   return waitForWebview(label, timeoutMs);
 }
 
+const toolbarWebviewController = createPanelWebviewController({
+  appWindow,
+  Webview,
+  cache: state.toolbarWebviews,
+  pending: state.pendingToolbarWebviews,
+  getByLabel: (label) => Webview.getByLabel(label),
+  waitForWebview: waitForToolbarWebview,
+  getSite: (label) => {
+    const siteLabel = label.endsWith("-toolbar") ? label.slice(0, -"toolbar".length - 1) : label;
+    return getSiteMeta(siteLabel);
+  },
+  getMetrics: (label) => {
+    const siteLabel = label.endsWith("-toolbar") ? label.slice(0, -"toolbar".length - 1) : label;
+    return toolbarPhysicalMetrics(siteLabel);
+  },
+  buildOptions: (site, metrics) => buildToolbarWebviewOptions(buildToolbarUrl(site), metrics, PANEL_TOPBAR_HEIGHT),
+  shouldKeepVisible: (shouldShow) => shouldShow,
+  createPosition: (x, y) => new PhysicalPosition(x, y),
+  createSize: (width, height) => new PhysicalSize(width, height),
+});
+
+const panelWebviewController = createPanelWebviewController({
+  appWindow,
+  Webview,
+  cache: state.webviews,
+  pending: state.pendingWebviews,
+  getByLabel: (label) => Webview.getByLabel(label),
+  waitForWebview,
+  getSite: getSiteMeta,
+  getMetrics: panePhysicalMetrics,
+  buildOptions: buildPanelWebviewOptions,
+  shouldKeepVisible: (shouldShow, label) => shouldKeepWebviewVisible(shouldShow, isPanelCurrentlyVisible(label)),
+  createPosition: (x, y) => new PhysicalPosition(x, y),
+  createSize: (width, height) => new PhysicalSize(width, height),
+  onCreated: (site, webviewInstance) => {
+    webviewInstance.once("tauri://created", () => {
+      syncSiteAvailability(site.label, true, "", { fromWebview: true });
+    }).catch(() => {});
+
+    webviewInstance.once("tauri://error", (event) => {
+      const message = typeof event?.payload === "string" ? event.payload : "不可访问";
+      syncSiteAvailability(site.label, false, message, { fromWebview: true });
+    }).catch(() => {});
+  },
+  afterEnsure: ensureWebviewDropListener,
+});
+
 async function ensureToolbarWebview(siteLabel, shouldShow = true) {
-  const site = getSiteMeta(siteLabel);
-  if (!site) {
-    return null;
-  }
-
-  const toolbarLabel = getToolbarLabel(siteLabel);
-  if (state.pendingToolbarWebviews.has(toolbarLabel)) {
-    const pending = state.pendingToolbarWebviews.get(toolbarLabel);
-    const current = await pending;
-    if (shouldShow) {
-      await current.show();
-    } else {
-      await current.hide();
-    }
-    return current;
-  }
-
-  const createPromise = (async () => {
-    let current = state.toolbarWebviews.get(toolbarLabel) || (await Webview.getByLabel(toolbarLabel));
-    const metrics = await toolbarPhysicalMetrics(siteLabel);
-
-    if (!current) {
-      new Webview(appWindow, toolbarLabel, {
-        url: buildToolbarUrl(site),
-        x: metrics?.x ?? 0,
-        y: metrics?.y ?? 0,
-        width: metrics?.width ?? 1200,
-        height: metrics?.height ?? PANEL_TOPBAR_HEIGHT,
-        zoomHotkeysEnabled: false,
-        generalAutofillEnabled: false,
-        devtools: false,
-      });
-
-      current = await waitForToolbarWebview(toolbarLabel);
-    }
-
-    await current.setAutoResize(false);
-    if (metrics) {
-      await current.setPosition(new PhysicalPosition(metrics.x, metrics.y));
-      await current.setSize(new PhysicalSize(metrics.width, metrics.height));
-    }
-
-    if (shouldShow && metrics) {
-      await current.show();
-    } else {
-      await current.hide();
-    }
-
-    state.toolbarWebviews.set(toolbarLabel, current);
-    return current;
-  })();
-
-  state.pendingToolbarWebviews.set(toolbarLabel, createPromise);
-  try {
-    return await createPromise;
-  } finally {
-    state.pendingToolbarWebviews.delete(toolbarLabel);
-  }
+  return toolbarWebviewController.ensure(getToolbarLabel(siteLabel), shouldShow);
 }
 
 async function ensureWebview(siteLabel, shouldShow = true) {
-  const site = getSiteMeta(siteLabel);
-  if (!site) {
-    return null;
-  }
-
-  const shouldKeepVisible = shouldShow || isPanelCurrentlyVisible(siteLabel);
-
-  if (state.pendingWebviews.has(siteLabel)) {
-    const pending = state.pendingWebviews.get(siteLabel);
-    const current = await pending;
-    if (shouldKeepVisible) {
-      await current.show();
-    } else {
-      await current.hide();
-    }
-    return current;
-  }
-
-  const createPromise = (async () => {
-    let current = state.webviews.get(siteLabel) || (await Webview.getByLabel(siteLabel));
-    const metrics = await panePhysicalMetrics(siteLabel);
-
-    if (!current) {
-      const webviewInstance = new Webview(appWindow, site.label, {
-        url: site.url,
-        x: metrics?.x ?? 0,
-        y: metrics?.y ?? 0,
-        width: metrics?.width ?? 1200,
-        height: metrics?.height ?? 800,
-        dataDirectory: site.dataDirectory,
-        zoomHotkeysEnabled: false,
-        generalAutofillEnabled: true,
-        devtools: true,
-      });
-
-      webviewInstance.once("tauri://created", () => {
-        syncSiteAvailability(site.label, true, "", { fromWebview: true });
-      }).catch(() => {});
-
-      webviewInstance.once("tauri://error", (event) => {
-        const message = typeof event?.payload === "string" ? event.payload : "不可访问";
-        syncSiteAvailability(site.label, false, message, { fromWebview: true });
-      }).catch(() => {});
-
-      current = await waitForWebview(siteLabel);
-    }
-
-    await current.setAutoResize(false);
-    if (metrics) {
-      await current.setPosition(new PhysicalPosition(metrics.x, metrics.y));
-      await current.setSize(new PhysicalSize(metrics.width, metrics.height));
-    }
-
-    if (shouldKeepVisible && metrics) {
-      await current.show();
-    } else if (!shouldKeepVisible || !metrics) {
-      await current.hide();
-    }
-
-    await ensureWebviewDropListener(siteLabel, current);
-    state.webviews.set(siteLabel, current);
-    return current;
-  })();
-
-  state.pendingWebviews.set(siteLabel, createPromise);
-  try {
-    return await createPromise;
-  } finally {
-    state.pendingWebviews.delete(siteLabel);
-  }
+  return panelWebviewController.ensure(siteLabel, shouldShow);
 }
 
 async function ensureTargetsReady(targetLabels, shouldShow = false) {
-  const uniqueLabels = [...new Set(targetLabels)].filter((label) => getSiteMeta(label));
-  await Promise.all(uniqueLabels.map((label) => ensureWebview(label, shouldShow)));
+  await panelWebviewController.ensureMany(targetLabels, shouldShow);
 }
 
 async function ensureToolbarTargetsReady(targetLabels, shouldShow = false) {
-  const uniqueLabels = [...new Set(targetLabels)].filter((label) => getSiteMeta(label));
-  await Promise.all(uniqueLabels.map((label) => ensureToolbarWebview(label, shouldShow)));
+  await toolbarWebviewController.ensureMany(targetLabels.map(getToolbarLabel), shouldShow);
 }
 
 async function relayoutWebviews() {
-  const visibleTargets = new Set(getVisibleTargets());
-
-  for (const site of state.sites) {
-    const current = state.webviews.get(site.label) || (await Webview.getByLabel(site.label));
-    if (!current) {
-      continue;
-    }
-
-    const metrics = await panePhysicalMetrics(site.label);
-    if (!metrics || !visibleTargets.has(site.label)) {
-      await current.hide();
-      continue;
-    }
-
-    await current.setPosition(new PhysicalPosition(metrics.x, metrics.y));
-    await current.setSize(new PhysicalSize(metrics.width, metrics.height));
-    await current.show();
-  }
+  await panelWebviewController.relayout(state.sites, new Set(getVisibleTargets()), isAnyOverlayOpen());
 }
 
 async function relayoutToolbarWebviews() {
   const visibleTargets = new Set(getVisibleTargets());
-
-  for (const site of state.sites) {
-    const toolbarLabel = getToolbarLabel(site.label);
-    const current =
-      state.toolbarWebviews.get(toolbarLabel) || (await Webview.getByLabel(toolbarLabel));
-    if (!current) {
-      continue;
-    }
-
-    const metrics = await toolbarPhysicalMetrics(site.label);
-    if (!metrics || !visibleTargets.has(site.label)) {
-      await current.hide();
-      continue;
-    }
-
-    await current.setPosition(new PhysicalPosition(metrics.x, metrics.y));
-    await current.setSize(new PhysicalSize(metrics.width, metrics.height));
-    await current.show();
-  }
+  const toolbarSites = state.sites.map((site) => ({ ...site, label: getToolbarLabel(site.label) }));
+  const visibleToolbars = new Set([...visibleTargets].map(getToolbarLabel));
+  await toolbarWebviewController.relayout(toolbarSites, visibleToolbars, isAnyOverlayOpen());
 }
 
 async function settleLayout(passes = 3) {
-  const version = ++state.relayoutVersion;
-  const delays = [0, 120, 260];
-
-  for (let index = 0; index < passes; index += 1) {
-    const delay = delays[index] ?? 260;
-    if (delay > 0) {
-      await sleep(delay);
-    }
-    if (version !== state.relayoutVersion) {
-      return;
-    }
-    await relayoutWebviews();
-    await relayoutToolbarWebviews();
-  }
+  await layoutRefreshController?.settle(passes);
 }
 
 async function syncVisibleWebviews() {
-  const suppress = isAnyOverlayOpen();
-  const visibleTargets = new Set(getVisibleTargets());
-
-  for (const site of state.sites) {
-    const current = state.webviews.get(site.label) || (await Webview.getByLabel(site.label));
-    if (!current) {
-      continue;
-    }
-
-    if (!suppress && visibleTargets.has(site.label) && !getPanelElement(site.label)?.hidden) {
-      await current.show();
-    } else {
-      await current.hide();
-    }
-  }
+  await panelWebviewController.syncVisible(
+    state.sites,
+    new Set(getVisibleTargets()),
+    isAnyOverlayOpen(),
+    (label) => !getPanelElement(label)?.hidden,
+  );
 }
 
 async function syncVisibleToolbarWebviews() {
-  const suppress = isAnyOverlayOpen();
-  const visibleTargets = new Set(getVisibleTargets());
-
-  for (const site of state.sites) {
-    const toolbarLabel = getToolbarLabel(site.label);
-    const current =
-      state.toolbarWebviews.get(toolbarLabel) || (await Webview.getByLabel(toolbarLabel));
-    if (!current) {
-      continue;
-    }
-
-    if (!suppress && visibleTargets.has(site.label) && !getPanelElement(site.label)?.hidden) {
-      await current.show();
-    } else {
-      await current.hide();
-    }
-  }
+  await toolbarWebviewController.syncVisible(
+    state.sites,
+    new Set(getVisibleTargets()),
+    isAnyOverlayOpen(),
+    (label) => !getPanelElement(label)?.hidden,
+    (site) => getToolbarLabel(site.label),
+  );
 }
 
 function syncPanelShellStates() {
@@ -2659,95 +1534,19 @@ async function syncToolbarStates() {
     }
 
     state.toolbarWebviews.set(toolbarLabel, current);
-    await tauriEvent.emitTo(toolbarLabel, "panel-toolbar-state", {
-      site: site.label,
-      title: site.title,
-      accent: site.accentColor,
-      theme: state.theme,
-      maximized: maximizedLabel === site.label,
-    });
+    await tauriEvent.emitTo(
+      toolbarLabel,
+      "panel-toolbar-state",
+      buildPanelToolbarState(site, state.theme, maximizedLabel === site.label),
+    );
   }
 }
 
 function getLayoutRects(labels) {
-  const count = labels.length;
   const gap = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--grid-gap")) || 2;
   const container = document.querySelector(".grid-preview");
   const { width, height } = container.getBoundingClientRect();
-  const rects = new Map();
-  const handles = [];
-  const layout = currentLayoutState();
-
-  if (count === 0) {
-    return { rects, handles };
-  }
-
-  if (count === 1) {
-    rects.set(labels[0], createRect(0, 0, width, height));
-    return { rects, handles };
-  }
-
-  if (count === 2) {
-    const split = clamp(layout.twoWaySplit, 0.2, 0.8);
-    const leftWidth = Math.round(width * split - gap / 2);
-    const rightX = leftWidth + gap;
-    rects.set(labels[0], createRect(0, 0, leftWidth, height));
-    rects.set(labels[1], createRect(rightX, 0, Math.max(0, width - rightX), height));
-    handles.push({
-      key: "two-way",
-      axis: "x",
-      x: Math.round(width * split),
-      y: 0,
-      width: 12,
-      height,
-    });
-    return { rects, handles };
-  }
-
-  if (count === 3) {
-    let [first, second] = layout.threeWaySplits;
-    first = clamp(first, 0.18, 0.7);
-    second = clamp(second, first + 0.12, 0.82);
-    layout.threeWaySplits = [first, second];
-
-    const x1 = Math.round(width * first);
-    const x2 = Math.round(width * second);
-    const leftWidth = Math.max(0, x1 - gap / 2);
-    const centerX = x1 + gap / 2;
-    const centerWidth = Math.max(0, x2 - x1 - gap);
-    const rightX = x2 + gap / 2;
-    const rightWidth = Math.max(0, width - rightX);
-
-    rects.set(labels[0], createRect(0, 0, leftWidth, height));
-    rects.set(labels[1], createRect(centerX, 0, centerWidth, height));
-    rects.set(labels[2], createRect(rightX, 0, rightWidth, height));
-    handles.push(
-      { key: "three-way-left", axis: "x", x: x1, y: 0, width: 12, height },
-      { key: "three-way-right", axis: "x", x: x2, y: 0, width: 12, height },
-    );
-    return { rects, handles };
-  }
-
-  const colSplit = clamp(layout.quadCols, 0.24, 0.76);
-  const rowSplit = clamp(layout.quadRows, 0.24, 0.76);
-  const splitX = Math.round(width * colSplit);
-  const splitY = Math.round(height * rowSplit);
-  const leftWidth = Math.max(0, splitX - gap / 2);
-  const rightX = splitX + gap / 2;
-  const rightWidth = Math.max(0, width - rightX);
-  const topHeight = Math.max(0, splitY - gap / 2);
-  const bottomY = splitY + gap / 2;
-  const bottomHeight = Math.max(0, height - bottomY);
-
-  rects.set(labels[0], createRect(0, 0, leftWidth, topHeight));
-  rects.set(labels[1], createRect(rightX, 0, rightWidth, topHeight));
-  rects.set(labels[2], createRect(0, bottomY, leftWidth, bottomHeight));
-  rects.set(labels[3], createRect(rightX, bottomY, rightWidth, bottomHeight));
-  handles.push(
-    { key: "quad-cols", axis: "x", x: splitX, y: 0, width: 12, height },
-    { key: "quad-rows", axis: "y", x: 0, y: splitY, width, height: 12 },
-  );
-  return { rects, handles };
+  return getPanelLayoutRects(labels, currentLayoutState(), { width, height }, gap);
 }
 
 function applyPanelRects(rects) {
@@ -2773,88 +1572,23 @@ function applyPanelRects(rects) {
 
 function renderLayoutHandles(handles) {
   const layer = document.querySelector("#layout-handles");
-  layer.innerHTML = "";
-
-  for (const handle of handles) {
-    const element = document.createElement("button");
-    element.type = "button";
-    element.className = "layout-handle";
-    element.dataset.axis = handle.axis;
-    element.dataset.key = handle.key;
-    element.style.left = `${handle.x}px`;
-    element.style.top = `${handle.y}px`;
-    element.style.width = `${handle.width}px`;
-    element.style.height = `${handle.height}px`;
-    element.addEventListener("pointerdown", (event) => startHandleDrag(event, handle));
-    layer.appendChild(element);
-  }
+  renderPanelLayoutHandles({
+    document,
+    layer,
+    handles,
+    onPointerDown: startHandleDrag,
+  });
 }
 
 function renderEmptyState() {
   const container = document.querySelector("#layout-empty");
-  const visibleCount = getVisibleTargets().length;
-  container.innerHTML = "";
-  container.hidden = visibleCount !== 0;
-
-  if (visibleCount !== 0) {
-    return;
-  }
-
-  const card = document.createElement("div");
-  card.className = "layout-empty-card";
-
-  const preview = document.createElement("div");
-  preview.className = "layout-empty-preview";
-
-  const glow = document.createElement("div");
-  glow.className = "layout-empty-preview-glow";
-
-  const mark = document.createElement("div");
-  mark.className = "layout-empty-mark brand-mark-frame";
-
-  const logo = document.createElement("img");
-  logo.className = "brand-mark-logo layout-empty-mark-logo";
-  logo.src = "./assets/chatdock-logo.png";
-  logo.alt = "ChatDock logo";
-
-  mark.appendChild(logo);
-  preview.append(glow, mark);
-
-  const title = document.createElement("h2");
-  title.textContent = TEXT.emptyTitle;
-
-  const message = document.createElement("p");
-  message.textContent = TEXT.emptyMessage;
-
-  const steps = document.createElement("div");
-  steps.className = "layout-empty-steps";
-
-  [
-    "勾选你想观察的 AI",
-    "支持同时展示最多 4 个",
-    "超过 4 个会自动分页",
-  ].forEach((label, index) => {
-    const item = document.createElement("div");
-    item.className = "layout-empty-step";
-
-    const badge = document.createElement("span");
-    badge.className = "layout-empty-step-index";
-    badge.textContent = String(index + 1);
-
-    const text = document.createElement("span");
-    text.className = "layout-empty-step-text";
-    text.textContent = label;
-
-    item.append(badge, text);
-    steps.appendChild(item);
+  renderEmptyPanelState({
+    document,
+    container,
+    visibleCount: getVisibleTargets().length,
+    title: TEXT.emptyTitle,
+    message: TEXT.emptyMessage,
   });
-
-  const hint = document.createElement("div");
-  hint.className = "layout-empty-hint";
-  hint.textContent = "从底部开始组装你的 AI 工作台";
-
-  card.append(preview, title, message, steps, hint);
-  container.append(card);
 }
 
 function applyLayout() {
@@ -2866,71 +1600,19 @@ function applyLayout() {
 }
 
 async function refreshLayout(passes = 3) {
-  syncCompactBarHeight();
-  if (!hasUsableGridSize()) {
-    return;
-  }
-  applyLayout();
-  if (isAnyOverlayOpen()) {
-    await syncVisibleWebviews();
-    await syncVisibleToolbarWebviews();
-    if (isOnboardingOpen()) {
-      renderOnboardingStep();
-    }
-    return;
-  }
-  await ensureTargetsReady(getVisibleTargets(), true);
-  await ensureToolbarTargetsReady(getVisibleTargets(), true);
-  await syncVisibleWebviews();
-  await syncVisibleToolbarWebviews();
-  await syncToolbarStates();
-  await settleLayout(passes);
+  await layoutRefreshController?.refresh(passes);
 }
 
 function clearScheduledLayoutRefreshes() {
-  for (const timer of state.layoutRefreshTimers) {
-    window.clearTimeout(timer);
-  }
-  state.layoutRefreshTimers = [];
+  layoutRefreshController?.clearScheduled();
 }
 
 function scheduleLayoutRefresh(reason = "layout", delays = [0, 80, 180, 320, 520]) {
-  const token = ++state.layoutRefreshToken;
-  clearScheduledLayoutRefreshes();
-
-  state.layoutRefreshTimers = delays.map((delay) =>
-    window.setTimeout(() => {
-      if (token !== state.layoutRefreshToken) {
-        return;
-      }
-      if (!hasUsableGridSize()) {
-        return;
-      }
-      void refreshLayout(reason === "window-state" ? 4 : 3);
-    }, delay),
-  );
+  layoutRefreshController?.schedule(reason, delays);
 }
 
 function updateLayoutStateFromDrag(handleKey, ratio) {
-  const layout = currentLayoutState();
-
-  if (handleKey === "two-way") {
-    layout.twoWaySplit = clamp(ratio, 0.2, 0.8);
-  }
-  if (handleKey === "three-way-left") {
-    const [, right] = layout.threeWaySplits;
-    layout.threeWaySplits = [clamp(ratio, 0.18, right - 0.12), right];
-  }
-  if (handleKey === "three-way-right") {
-    const [left] = layout.threeWaySplits;
-    layout.threeWaySplits = [left, clamp(ratio, left + 0.12, 0.82)];
-  }
-  if (handleKey === "quad-cols") {
-    layout.quadCols = clamp(ratio, 0.24, 0.76);
-  }
-  if (handleKey === "quad-rows") {
-    layout.quadRows = clamp(ratio, 0.24, 0.76);
-  }
+  updateLayoutFromHandleDrag(currentLayoutState(), handleKey, ratio);
 }
 
 function startHandleDrag(event, handle) {
@@ -2983,86 +1665,42 @@ function handlePointerMove(event) {
 
 function renderPageTabs() {
   const container = document.querySelector("#page-tabs");
-  const pageCount = getPageCount();
-  const selectedCount = state.workspace.selectedSiteLabels.length;
-  container.innerHTML = "";
-
-  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
-    const pageLabels = getPageLabels(pageIndex);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `page-tab${pageIndex === state.workspace.activePageIndex ? " active" : ""}`;
-    button.textContent = `第 ${pageIndex + 1} 页`;
-    button.title = `${pageLabels.length || 0}/${MAX_SITES_PER_PAGE} 个 AI`;
-    button.addEventListener("click", async () => {
-      if (state.workspace.activePageIndex === pageIndex) {
-        return;
-      }
+  renderPageTabsDom({
+    document,
+    container,
+    pageCount: getPageCount(),
+    activePageIndex: state.workspace.activePageIndex,
+    selectedCount: state.workspace.selectedSiteLabels.length,
+    maxSitesPerPage: MAX_SITES_PER_PAGE,
+    selectedPrefix: TEXT.selectedPrefix,
+    getPageLabels,
+    onPageChange: async (pageIndex) => {
       state.workspace.activePageIndex = pageIndex;
       persistWorkspace();
       renderWorkspace();
       await refreshLayout();
-    });
-    container.appendChild(button);
-  }
-
-  const counter = document.createElement("span");
-  counter.className = "page-counter";
-  counter.textContent = `${TEXT.selectedPrefix} ${selectedCount}`;
-  container.appendChild(counter);
+    },
+  });
 }
 
 function renderGlobalTargets() {
   const container = document.querySelector("#global-targets");
-  const selected = new Set(state.workspace.selectedSiteLabels);
-  container.innerHTML = "";
-
-  for (const site of getVisibleManagedSites()) {
-    const isSelected = selected.has(site.label);
-    const selectedIndex = state.workspace.selectedSiteLabels.indexOf(site.label);
-    const availability = getSiteAvailability(site.label);
-    const isUnavailable = isSiteUnavailable(site.label);
-    const pill = document.createElement("label");
-    pill.className = `target-pill${isSelected ? " active" : ""}${isUnavailable ? " unavailable" : ""}`;
-    pill.dataset.siteLabel = site.label;
-    if (getContextMenuState().open && getContextMenuState().siteLabel === site.label) {
-      pill.classList.add("context-open");
-    }
-    if (isUnavailable) {
-      pill.title = availability?.message || "不可访问";
-      pill.setAttribute("aria-label", `${site.title}，${availability?.message || "不可访问"}`);
-    }
-
-    pill.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      openTargetContextMenu(site.label, event.clientX, event.clientY);
-    });
-
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = isSelected;
-    input.value = site.label;
-    input.addEventListener("change", async () => {
-      setSiteSelected(site.label, input.checked);
+  renderTargetBar({
+    document,
+    container,
+    sites: getVisibleManagedSites(),
+    selectedLabels: state.workspace.selectedSiteLabels,
+    contextMenu: getContextMenuState(),
+    getAvailability: getSiteAvailability,
+    isUnavailable: isSiteUnavailable,
+    createDot,
+    onContextMenu: openTargetContextMenu,
+    onSelectionChange: async (label, selected) => {
+      setSiteSelected(label, selected);
       renderWorkspace();
       await refreshLayout();
-    });
-
-    pill.append(input, createDot(site.accentColor));
-
-    if (isSelected) {
-      const order = document.createElement("span");
-      order.className = "target-order";
-      order.textContent = String(selectedIndex + 1);
-      pill.append(order);
-    }
-
-    const text = document.createElement("span");
-    text.textContent = site.title;
-    pill.append(text);
-    container.appendChild(pill);
-  }
-
+    },
+  });
 }
 
 async function handlePanelAction(action, target) {
@@ -3117,6 +1755,7 @@ function renderWorkspace() {
   syncPanelShellStates();
   applyLayout();
   void ensureSiteAvailability(state.workspace.visibleSiteLabels);
+  syncVueBridgeState();
 }
 
 function setSiteSelected(label, selected) {
@@ -3142,416 +1781,108 @@ function setSiteSelected(label, selected) {
   persistWorkspace();
 }
 
-function moveItem(array, fromIndex, toIndex) {
-  if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) {
-    return [...array];
-  }
-  const next = [...array];
-  const [item] = next.splice(fromIndex, 1);
-  next.splice(toIndex, 0, item);
-  return next;
-}
-
 function reorderVisibleSites(sourceLabel, targetLabel) {
-  const visible = [...state.workspace.visibleSiteLabels];
-  const fromIndex = visible.indexOf(sourceLabel);
-  const toIndex = visible.indexOf(targetLabel);
-  if (fromIndex === -1 || toIndex === -1 || fromIndex === toIndex) {
+  if (!reorderVisibleSitesInWorkspace(state.workspace, sourceLabel, targetLabel)) {
     return false;
   }
-
-  const reorderedVisible = moveItem(visible, fromIndex, toIndex);
-  const hidden = state.workspace.siteOrder.filter((label) => !visible.includes(label));
-  state.workspace.visibleSiteLabels = reorderedVisible;
-  state.workspace.siteOrder = [...reorderedVisible, ...hidden];
-  state.workspace.selectedSiteLabels = state.workspace.selectedSiteLabels
-    .filter((label) => reorderedVisible.includes(label))
-    .sort((left, right) => reorderedVisible.indexOf(left) - reorderedVisible.indexOf(right));
   persistWorkspace();
   return true;
 }
 
 function addVisibleSite(label) {
-  if (state.workspace.visibleSiteLabels.includes(label)) {
-    return;
-  }
-  state.workspace.visibleSiteLabels = [...state.workspace.visibleSiteLabels, label];
-  state.workspace.siteOrder = sanitizeSiteOrder([
-    ...state.workspace.siteOrder.filter((item) => item !== label),
-    label,
-  ]);
+  addVisibleSiteToWorkspace(state.workspace, label, sanitizeSiteOrder);
   persistWorkspace();
 }
 
 function removeVisibleSite(label) {
-  state.workspace.visibleSiteLabels = state.workspace.visibleSiteLabels.filter((item) => item !== label);
-  state.workspace.selectedSiteLabels = state.workspace.selectedSiteLabels.filter((item) => item !== label);
-  if (state.maximizedLabel === label) {
-    state.maximizedLabel = null;
-  }
+  const next = removeVisibleSiteFromWorkspace(state.workspace, label, state.maximizedLabel);
+  state.maximizedLabel = next.maximizedLabel;
   persistWorkspace();
 }
 
 function isSiteManagerOpen() {
-  const modal = document.querySelector("#site-manager");
-  return Boolean(modal && !modal.hidden);
+  return siteManagerController?.isOpen() === true;
 }
 
 function isCloseConfirmOpen() {
   const modal = document.querySelector("#close-confirm");
-  return Boolean(modal && !modal.hidden);
+  return isModalElementOpen(modal);
 }
 
 function isAboutDialogOpen() {
-  const modal = document.querySelector("#about-dialog");
-  return Boolean(modal && !modal.hidden);
+  return standardDialogsController?.isAboutOpen() === true;
 }
 
 function isLayoutPresetsOpen() {
-  const modal = document.querySelector("#layout-presets");
-  return Boolean(modal && !modal.hidden);
+  return standardDialogsController?.isLayoutPresetsOpen() === true;
 }
 
 async function openSiteManager() {
-  const modal = document.querySelector("#site-manager");
-  if (!modal) {
-    return;
-  }
-  modal.hidden = false;
-  renderSiteManager();
-  initSortableTargets();
-  syncCompactBarHeight();
-  await syncVisibleWebviews();
-  await syncVisibleToolbarWebviews();
-  await refreshLayout(1);
+  await siteManagerController?.open();
 }
 
 async function closeSiteManager() {
-  const modal = document.querySelector("#site-manager");
-  if (!modal) {
-    return;
-  }
-  modal.hidden = true;
-  await refreshLayout();
+  await siteManagerController?.close();
 }
 
 async function openLayoutPresets() {
-  const modal = document.querySelector("#layout-presets");
-  if (!modal) {
-    return;
-  }
-
-  if (isSiteManagerOpen()) {
-    await closeSiteManager();
-  }
-
-  if (isOnboardingOpen()) {
-    await closeOnboarding(true);
-  }
-
-  if (isTargetContextMenuOpen()) {
-    closeTargetContextMenu();
-  }
-
-  if (isLayoutPresetMenuOpen()) {
-    void closeLayoutPresetMenu();
-  }
-  if (isLayoutPresetDropdownOpen()) {
-    void closeLayoutPresetDropdown();
-  }
-
-  modal.hidden = false;
-  renderLayoutPresets();
-  syncCompactBarHeight();
-  await syncVisibleWebviews();
-  await syncVisibleToolbarWebviews();
-  await refreshLayout(1);
+  await standardDialogsController?.openLayoutPresets();
 }
 
 async function closeLayoutPresets() {
-  const modal = document.querySelector("#layout-presets");
-  if (!modal) {
-    return;
-  }
-
-  modal.hidden = true;
-  await refreshLayout();
+  await standardDialogsController?.closeLayoutPresets();
 }
 
 async function openAboutDialog() {
-  const modal = document.querySelector("#about-dialog");
-  if (!modal) {
-    return;
-  }
-
-  if (isSiteManagerOpen()) {
-    await closeSiteManager();
-  }
-
-  if (isOnboardingOpen()) {
-    await closeOnboarding(true);
-  }
-
-  if (isTargetContextMenuOpen()) {
-    closeTargetContextMenu();
-  }
-
-  modal.hidden = false;
-  await syncVisibleWebviews();
-  await syncVisibleToolbarWebviews();
-
-  const closeButton = document.querySelector("#close-about");
-  window.requestAnimationFrame(() => {
-    closeButton?.focus();
-  });
+  await standardDialogsController?.openAbout();
 }
 
 async function closeAboutDialog() {
-  const modal = document.querySelector("#about-dialog");
-  if (!modal) {
-    return;
-  }
-
-  modal.hidden = true;
-  await refreshLayout();
+  await standardDialogsController?.closeAbout();
 }
 
 async function showCloseConfirm() {
-  const modal = document.querySelector("#close-confirm");
-  if (!modal) {
-    return true;
-  }
-
-  if (state.closeConfirm.open) {
-    return new Promise((resolve) => {
-      const previousResolver = state.closeConfirm.resolver;
-      state.closeConfirm.resolver = (result) => {
-        previousResolver?.(result);
-        resolve(result);
-      };
-    });
-  }
-
-  if (isSiteManagerOpen()) {
-    await closeSiteManager();
-  }
-
-  if (isOnboardingOpen()) {
-    await closeOnboarding(true);
-  }
-
-  state.closeConfirm.open = true;
-  modal.hidden = false;
-  await syncVisibleWebviews();
-  await syncVisibleToolbarWebviews();
-
-  const acceptButton = document.querySelector("#accept-close-confirm");
-  window.requestAnimationFrame(() => {
-    acceptButton?.focus();
-  });
-
-  return new Promise((resolve) => {
-    state.closeConfirm.resolver = resolve;
-  });
+  return closeConfirmController?.show() ?? true;
 }
 
 async function resolveCloseConfirm(accepted) {
-  const modal = document.querySelector("#close-confirm");
-  if (!modal || !state.closeConfirm.open) {
-    return;
-  }
-
-  modal.hidden = true;
-  state.closeConfirm.open = false;
-  const resolver = state.closeConfirm.resolver;
-  state.closeConfirm.resolver = null;
-  resolver?.(accepted);
-  await refreshLayout();
+  await closeConfirmController?.resolve(accepted);
 }
 
 function createManagerItem(site, visible) {
-  const item = document.createElement("div");
-  item.className = "manager-item";
-  item.dataset.siteLabel = site.label;
-
-  const main = document.createElement("div");
-  main.className = "manager-item-main";
-  main.append(createDot(site.accentColor));
-
-  const meta = document.createElement("div");
-  meta.className = "manager-item-meta";
-
-  const title = document.createElement("span");
-  title.className = "manager-item-title";
-  title.textContent = site.title;
-
-  const label = document.createElement("span");
-  label.className = "manager-item-label";
-  label.textContent = site.label;
-
-  meta.append(title, label);
-  main.append(meta);
-
-  const actions = document.createElement("div");
-  actions.className = "manager-actions";
-
-  if (visible) {
-    actions.append(createDragHandle());
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "mini-button";
-    remove.textContent = "移除";
-    remove.addEventListener("click", async () => {
+  return createSiteManagerItem({
+    document,
+    site,
+    visible,
+    createDot,
+    createDragHandle,
+    onRemove: async () => {
       removeVisibleSite(site.label);
       renderWorkspace();
       await refreshLayout();
-    });
-    actions.append(remove);
-  } else {
-    const add = document.createElement("button");
-    add.type = "button";
-    add.className = "mini-button";
-    add.textContent = "添加";
-    add.addEventListener("click", async () => {
+    },
+    onAdd: async () => {
       addVisibleSite(site.label);
       renderWorkspace();
       await refreshLayout();
-    });
-    actions.append(add);
-  }
-
-  item.append(main, actions);
-  return item;
+    },
+  });
 }
 
 function renderSiteManager() {
-  const visibleContainer = document.querySelector("#visible-sites");
-  const hiddenContainer = document.querySelector("#hidden-sites");
-  const visibleCount = document.querySelector("#visible-sites-count");
-  const hiddenCount = document.querySelector("#hidden-sites-count");
-  if (!visibleContainer || !hiddenContainer || !visibleCount || !hiddenCount) {
-    return;
-  }
-
-  visibleContainer.innerHTML = "";
-  hiddenContainer.innerHTML = "";
-
-  const visibleSites = getVisibleManagedSites();
-  const hiddenSites = getHiddenManagedSites();
-
-  visibleCount.textContent = `${visibleSites.length} 个`;
-  hiddenCount.textContent = `${hiddenSites.length} 个`;
-
-  for (const site of visibleSites) {
-    visibleContainer.appendChild(createManagerItem(site, true));
-  }
-
-  for (const site of hiddenSites) {
-    hiddenContainer.appendChild(createManagerItem(site, false));
-  }
+  siteManagerController?.render();
 }
 
 function destroySortables() {
-  for (const sortable of state.sortables) {
-    sortable.destroy();
-  }
-  state.sortables = [];
+  siteManagerController?.destroySortables();
 }
 
 function syncVisibleSitesFromDom(containerSelector) {
-  const container = document.querySelector(containerSelector);
-  if (!container) {
-    return false;
-  }
-  const reorderedVisible = [...container.querySelectorAll("[data-site-label]")]
-    .map((node) => node.dataset.siteLabel)
-    .filter(Boolean);
-  if (!reorderedVisible.length) {
-    return false;
-  }
-
-  const currentVisible = [...state.workspace.visibleSiteLabels];
-  const changed = reorderedVisible.length === currentVisible.length
-    && reorderedVisible.some((label, index) => currentVisible[index] !== label);
-  if (!changed) {
-    return false;
-  }
-
-  const hidden = state.workspace.siteOrder.filter((label) => !reorderedVisible.includes(label));
-  state.workspace.visibleSiteLabels = reorderedVisible;
-  state.workspace.siteOrder = [...reorderedVisible, ...hidden];
-  state.workspace.selectedSiteLabels = state.workspace.selectedSiteLabels
-    .filter((label) => reorderedVisible.includes(label))
-    .sort((left, right) => reorderedVisible.indexOf(left) - reorderedVisible.indexOf(right));
-  persistWorkspace();
-  return true;
+  return siteManagerController?.syncVisibleSitesFromDom(containerSelector) || false;
 }
 
 function initSortableTargets() {
-  destroySortables();
-
-  const bar = document.querySelector("#global-targets");
-  if (bar) {
-    state.sortables.push(
-      Sortable.create(bar, {
-        animation: 180,
-        delay: 220,
-        delayOnTouchOnly: false,
-        ghostClass: "drag-ghost",
-        chosenClass: "drag-chosen",
-        dragClass: "drag-active",
-        draggable: ".target-pill",
-        filter: "input, button",
-        preventOnFilter: false,
-        forceFallback: true,
-        fallbackTolerance: 4,
-        fallbackOnBody: true,
-        onEnd: async () => {
-          if (syncVisibleSitesFromDom("#global-targets")) {
-            renderWorkspace();
-            await refreshLayout();
-          } else {
-            renderWorkspace();
-          }
-        },
-      }),
-    );
-  }
-
-  const manager = document.querySelector("#visible-sites");
-  if (manager) {
-    state.sortables.push(
-      Sortable.create(manager, {
-        animation: 180,
-        delay: 0,
-        delayOnTouchOnly: false,
-        ghostClass: "drag-ghost",
-        chosenClass: "drag-chosen",
-        dragClass: "drag-active",
-        draggable: ".manager-item",
-        handle: ".manager-drag-handle",
-        filter: ".mini-button",
-        preventOnFilter: false,
-        forceFallback: true,
-        forceAutoScrollFallback: true,
-        fallbackTolerance: 4,
-        fallbackOnBody: true,
-        scroll: true,
-        bubbleScroll: true,
-        scrollSensitivity: 80,
-        scrollSpeed: 14,
-        onEnd: async () => {
-          if (syncVisibleSitesFromDom("#visible-sites")) {
-            renderWorkspace();
-            await refreshLayout();
-          } else {
-            renderWorkspace();
-          }
-        },
-      }),
-    );
-  }
+  siteManagerController?.initSortableTargets();
 }
 
 async function reloadTargets(targets) {
@@ -3662,40 +1993,23 @@ function wireLayoutDragging() {
 }
 
 function wireResponsiveRelayout() {
-  const grid = document.querySelector(".grid-preview");
-  if (typeof ResizeObserver === "function" && grid) {
-    state.resizeObserver?.disconnect?.();
-    state.resizeObserver = new ResizeObserver(() => {
-      scheduleLayoutRefresh("container-resize", [0, 90, 220, 420]);
-    });
-    state.resizeObserver.observe(grid);
-  }
-
-  const compactBar = document.querySelector(".compact-bar");
-  if (typeof ResizeObserver === "function" && compactBar) {
-    state.compactBarObserver?.disconnect?.();
-    state.compactBarObserver = new ResizeObserver(() => {
-      if (syncCompactBarHeight()) {
-        scheduleLayoutRefresh("compact-bar-resize", [0, 90, 220, 420]);
-      }
-    });
-    state.compactBarObserver.observe(compactBar);
-  }
-
-  window.addEventListener("resize", () => {
-    scheduleLayoutRefresh("window-resize", [0, 100, 240, 420]);
-    if (isOnboardingOpen()) {
-      renderOnboardingStep();
-    }
-    if (isTargetContextMenuOpen()) {
-      positionTargetContextMenu();
-    }
-    if (isLayoutPresetMenuOpen()) {
-      void positionLayoutPresetMenuWebview();
-    }
-    if (isLayoutPresetDropdownOpen()) {
-      void positionLayoutPresetDropdownWebview();
-    }
+  wirePanelResponsiveRelayout({
+    document,
+    window,
+    ResizeObserver: typeof ResizeObserver === "function" ? ResizeObserver : undefined,
+    state,
+    actions: {
+      scheduleLayoutRefresh,
+      syncCompactBarHeight,
+      isOnboardingOpen,
+      renderOnboardingStep,
+      isTargetContextMenuOpen,
+      positionTargetContextMenu,
+      isLayoutPresetMenuOpen,
+      positionLayoutPresetMenuWebview,
+      isLayoutPresetDropdownOpen,
+      positionLayoutPresetDropdownWebview,
+    },
   });
 }
 
@@ -3741,12 +2055,133 @@ async function boot() {
     throw new Error("window.__TAURI__ is not available");
   }
 
+  mountVueApp();
+  workspaceStore = useWorkspaceStore();
+
   setStatus("\u6b63\u5728\u52a0\u8f7d AI \u5217\u8868...", "working");
   await fetchSites();
   state.onboarding.completed = loadOnboardingCompleted();
   state.workspace = loadWorkspace();
   state.workspace = sanitizeWorkspace(state.workspace);
   state.layoutPresets = loadLayoutPresets();
+  targetContextMenuController = createTargetContextMenuController({
+    document,
+    window,
+    state: state.targetContextMenu,
+    actions: {
+      getSiteMeta,
+      syncVisibleWebviews,
+      syncVisibleToolbarWebviews,
+    },
+  });
+  siteManagerController = createSiteManagerController({
+    document,
+    Sortable,
+    state,
+    actions: {
+      createManagerItem,
+      getVisibleManagedSites,
+      getHiddenManagedSites,
+      renderLists: renderSiteManagerLists,
+      syncCompactBarHeight,
+      syncVisibleWebviews,
+      syncVisibleToolbarWebviews,
+      refreshLayout,
+      persistWorkspace,
+      renderWorkspace,
+      syncVisibleSiteOrder,
+      workspace: state.workspace,
+    },
+  });
+  standardDialogsController = createStandardDialogsController({
+    document,
+    requestAnimationFrame: window.requestAnimationFrame,
+    actions: {
+      isSiteManagerOpen,
+      closeSiteManager,
+      isOnboardingOpen,
+      closeOnboarding,
+      isTargetContextMenuOpen,
+      closeTargetContextMenu,
+      isLayoutPresetMenuOpen,
+      closeLayoutPresetMenu,
+      isLayoutPresetDropdownOpen,
+      closeLayoutPresetDropdown,
+      renderLayoutPresets,
+      syncCompactBarHeight,
+      syncVisibleWebviews,
+      syncVisibleToolbarWebviews,
+      refreshLayout,
+    },
+  });
+  closeConfirmController = createCloseConfirmController({
+    document,
+    requestAnimationFrame: window.requestAnimationFrame,
+    state: state.closeConfirm,
+    actions: {
+      isSiteManagerOpen,
+      closeSiteManager,
+      isOnboardingOpen,
+      closeOnboarding,
+      syncVisibleWebviews,
+      syncVisibleToolbarWebviews,
+      refreshLayout,
+    },
+  });
+  layoutRefreshController = createLayoutRefreshController({
+    state,
+    timerApi: {
+      setTimeout: window.setTimeout.bind(window),
+      clearTimeout: window.clearTimeout.bind(window),
+    },
+    actions: {
+      syncCompactBarHeight,
+      hasUsableGridSize,
+      applyLayout,
+      isAnyOverlayOpen,
+      syncVisibleWebviews,
+      syncVisibleToolbarWebviews,
+      isOnboardingOpen,
+      renderOnboardingStep,
+      ensureTargetsReady,
+      ensureToolbarTargetsReady,
+      getVisibleTargets,
+      syncToolbarStates,
+      relayoutWebviews,
+      relayoutToolbarWebviews,
+      sleep,
+    },
+  });
+  layoutPresetController = createLayoutPresetController({
+    document,
+    state,
+    actions: {
+      getSiteMeta,
+      getAllSiteLabels,
+      normalizePageLayouts,
+      getPageCount,
+      persistLayoutPresets,
+      persistWorkspace,
+      renderWorkspace,
+      refreshLayout,
+      setStatus,
+      syncLayoutPresetDropdownState,
+      openLayoutPresets,
+      closeLayoutPresetMenu,
+    },
+  });
+  onboardingController = createOnboardingController({
+    document,
+    window,
+    steps: ONBOARDING_STEPS,
+    state: state.onboarding,
+    isSiteManagerOpen,
+    closeSiteManager,
+    syncVisibleWebviews,
+    syncVisibleToolbarWebviews,
+    refreshLayout,
+    persistCompleted: persistOnboardingCompleted,
+  });
   persistWorkspace();
   syncCompactBarHeight();
 
@@ -3754,106 +2189,29 @@ async function boot() {
   await renderAppVersion();
   renderWorkspace();
 
-  await tauriEvent.listen("panel-toolbar-action", async ({ payload }) => {
-    const { action, site } = payload || {};
-    if (!action || !site) {
-      return;
-    }
-    await handlePanelAction(action, site);
-  });
-
-  await tauriEvent.listen("layout-preset-dropdown-action", async ({ payload }) => {
-    if (payload?.action === "close") {
-      await closeLayoutPresetDropdown();
-      return;
-    }
-
-    if (payload?.action !== "apply" || !payload?.presetId) {
-      return;
-    }
-
-    await closeLayoutPresetDropdown();
-    await applyLayoutPreset(payload.presetId);
-  });
-
-  await tauriEvent.listen("layout-preset-menu-action", async ({ payload }) => {
-    if (payload?.action === "close") {
-      await closeLayoutPresetMenu();
-      return;
-    }
-
-    await runLayoutPresetMenuAction(payload?.action);
-  });
-
-  await tauriEvent.listen(SITE_AVAILABILITY_SYNC_EVENT, ({ payload }) => {
-    const label = payload?.label;
-    if (!label) {
-      return;
-    }
-    syncSiteAvailability(label, payload.available !== false, payload.message || "", { fromWebview: true });
-  });
-
-  await tauriEvent.listen(ATTACHMENT_DEBUG_EVENT, ({ payload }) => {
-    logAttachmentDebug("backend-event", payload || {});
-  });
-
-  await appWindow.onDragDropEvent(async (event) => {
-    console.info("[drag-debug][tauri]", event.payload);
-    const dropTargetLabel = findPanelDropTarget(event.payload?.position);
-    setPanelDropTarget(dropTargetLabel);
-    logAttachmentDebug("tauri-drag:event", {
-      type: event.payload?.type,
-      position: event.payload?.position,
-      paths: event.payload?.paths || [],
-      dropTargetLabel,
-    });
-
-    if (event.payload?.type === "enter" || event.payload?.type === "over") {
-      if (dropTargetLabel) {
-        setPromptDropActive(false);
-      } else {
-        setPromptDropActive(true);
-      }
-      return;
-    }
-
-    if (event.payload?.type === "leave") {
-      clearDragVisualState();
-      return;
-    }
-
-    if (event.payload?.type !== "drop") {
-      return;
-    }
-
-    clearDragVisualState();
-    try {
-      if (dropTargetLabel) {
-        logAttachmentDebug("tauri-drag:panel-route", {
-          dropTargetLabel,
-          pathCount: (event.payload?.paths || []).length,
-        });
-        const result = await injectAttachmentsIntoPanel(dropTargetLabel, event.payload.paths || []);
-        if (result?.ok) {
-          const site = getSiteMeta(dropTargetLabel);
-          setStatus(`已将附件注入 ${site?.title || dropTargetLabel} 面板。`, "ok");
-        } else {
-          setStatus(`注入附件失败：${result?.message || "未知错误"}`, "fail");
-        }
-        return;
-      }
-
-      logAttachmentDebug("tauri-drag:composer-route", {
-        pathCount: (event.payload?.paths || []).length,
-      });
-      const count = await appendComposerPaths(event.payload.paths || []);
-      if (count > 0) {
-        setStatus(`已拖入 ${count} 个附件。`, "ok");
-      }
-    } catch (error) {
-      console.error(error);
-      setStatus(`添加附件失败：${error}`, "fail");
-    }
+  await wireTauriAppEvents({
+    tauriEvent,
+    appWindow,
+    siteAvailabilitySyncEvent: SITE_AVAILABILITY_SYNC_EVENT,
+    attachmentDebugEvent: ATTACHMENT_DEBUG_EVENT,
+    actions: {
+      handlePanelAction,
+      closeLayoutPresetDropdown,
+      applyLayoutPreset,
+      closeLayoutPresetMenu,
+      runLayoutPresetMenuAction,
+      syncSiteAvailability,
+      logAttachmentDebug,
+      findPanelDropTarget,
+      setPanelDropTarget,
+      setPromptDropActive,
+      clearDragVisualState,
+      injectAttachmentsIntoPanel,
+      getSiteMeta,
+      setStatus,
+      appendComposerPaths,
+      onError: console.error,
+    },
   });
 
   void ensureSiteAvailability(state.workspace.visibleSiteLabels, { force: true });
@@ -3861,171 +2219,41 @@ async function boot() {
   await refreshLayout();
   setStatus("\u9996\u6b21\u767b\u5f55\u5404 AI \u540e\uff0c\u540e\u7eed\u4f1a\u590d\u7528\u672c\u5730\u4f1a\u8bdd\u3002", "muted");
 
-  document.querySelector("#prompt-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await sendPrompt();
-  });
-
-  const promptField = document.querySelector("#prompt");
-  autosizePrompt();
-  wirePromptAttachments();
-  promptField.addEventListener("input", () => {
-    autosizePrompt();
-    scheduleLayoutRefresh("prompt-input", [0, 60, 180]);
-  });
-
-  promptField.addEventListener("keydown", async (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      await sendPrompt();
-    }
-  });
-
-  document.querySelector("#reload").addEventListener("click", reloadAll);
-  document.querySelector("#relayout").addEventListener("click", async () => {
-    await refreshLayout();
-    setStatus("\u5e03\u5c40\u5df2\u91cd\u65b0\u8ba1\u7b97\u3002", "ok");
-  });
-  document.querySelector("#open-onboarding").addEventListener("click", async () => {
-    await openOnboarding(true);
-  });
-  document.querySelector("#layout-preset-select").addEventListener("click", async () => {
-    if (isLayoutPresetDropdownOpen()) {
-      await closeLayoutPresetDropdown();
-      return;
-    }
-    await openLayoutPresetDropdown();
-  });
-  document.querySelector("#layout-preset-more").addEventListener("click", async () => {
-    if (isLayoutPresetMenuOpen()) {
-      await closeLayoutPresetMenu();
-      return;
-    }
-    await openLayoutPresetMenu();
-  });
-  document.querySelector("#open-about").addEventListener("click", async () => {
-    await openAboutDialog();
-  });
-  document.querySelector("#manage-sites").addEventListener("click", async () => {
-    await openSiteManager();
-  });
-  document.querySelector("#close-about").addEventListener("click", async () => {
-    await closeAboutDialog();
-  });
-  document.querySelector("#about-dialog").addEventListener("click", async (event) => {
-    if (event.target?.dataset?.closeAboutBackdrop === "true") {
-      await closeAboutDialog();
-    }
-  });
-  document.querySelector("#close-site-manager").addEventListener("click", async () => {
-    await closeSiteManager();
-  });
-  document.querySelector("#site-manager").addEventListener("click", async (event) => {
-    if (event.target?.dataset?.closeSiteManager === "true") {
-      await closeSiteManager();
-    }
-  });
-  document.querySelector("#close-layout-presets").addEventListener("click", async () => {
-    await closeLayoutPresets();
-  });
-  document.querySelector("#layout-presets").addEventListener("click", async (event) => {
-    if (event.target?.dataset?.closeLayoutPresets === "true") {
-      await closeLayoutPresets();
-    }
-  });
-  document.querySelector("#layout-preset-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const input = document.querySelector("#layout-preset-name");
-    if (saveLayoutPresetAs(input.value)) {
-      input.value = "";
-    }
-  });
-  document.querySelector("#layout-preset-menu").addEventListener("click", async (event) => {
-    if (event.target?.dataset?.closeLayoutPresetMenu === "true") {
-      await closeLayoutPresetMenu();
-      return;
-    }
-
-    const action = event.target?.dataset?.layoutPresetAction;
-    if (!action) {
-      return;
-    }
-
-    await runLayoutPresetMenuAction(action);
-  });
-  document.querySelector("#target-context-menu").addEventListener("click", async (event) => {
-    if (event.target?.dataset?.closeTargetContextMenu === "true") {
-      closeTargetContextMenu();
-      return;
-    }
-
-    const action = event.target?.dataset?.contextAction;
-    const siteLabel = state.targetContextMenu.siteLabel;
-    if (!action || !siteLabel) {
-      return;
-    }
-
-    closeTargetContextMenu();
-    await runTargetContextAction(action, siteLabel);
-  });
-  document.querySelector("#cancel-close-confirm").addEventListener("click", async () => {
-    await resolveCloseConfirm(false);
-  });
-  document.querySelector("#accept-close-confirm").addEventListener("click", async () => {
-    await resolveCloseConfirm(true);
-  });
-  document.querySelector("#close-confirm").addEventListener("click", async (event) => {
-    if (event.target?.dataset?.closeConfirmBackdrop === "true") {
-      await resolveCloseConfirm(false);
-    }
-  });
-  document.querySelector("#tour-prev").addEventListener("click", async () => {
-    await stepOnboarding(-1);
-  });
-  document.querySelector("#tour-next").addEventListener("click", async () => {
-    if (state.onboarding.stepIndex >= ONBOARDING_STEPS.length - 1) {
-      await closeOnboarding(true);
-      return;
-    }
-    await stepOnboarding(1);
-  });
-  document.querySelector("#tour-skip").addEventListener("click", async () => {
-    await closeOnboarding(true);
-  });
-  window.addEventListener("keydown", async (event) => {
-    if (event.key === "Escape" && isTargetContextMenuOpen()) {
-      event.preventDefault();
-      closeTargetContextMenu();
-      return;
-    }
-    if (event.key === "Escape" && isCloseConfirmOpen()) {
-      event.preventDefault();
-      await resolveCloseConfirm(false);
-      return;
-    }
-    if (event.key === "Escape" && isAboutDialogOpen()) {
-      event.preventDefault();
-      await closeAboutDialog();
-      return;
-    }
-    if (event.key === "Escape" && isSiteManagerOpen()) {
-      await closeSiteManager();
-    }
-    if (event.key === "Escape" && isOnboardingOpen()) {
-      await closeOnboarding(true);
-    }
-    if (isOnboardingOpen() && event.key === "ArrowRight") {
-      event.preventDefault();
-      if (state.onboarding.stepIndex >= ONBOARDING_STEPS.length - 1) {
-        await closeOnboarding(true);
-      } else {
-        await stepOnboarding(1);
-      }
-    }
-    if (isOnboardingOpen() && event.key === "ArrowLeft") {
-      event.preventDefault();
-      await stepOnboarding(-1);
-    }
+  wireAppDomEvents({
+    document,
+    window,
+    actions: {
+      sendPrompt,
+      autosizePrompt,
+      wirePromptAttachments,
+      scheduleLayoutRefresh,
+      reloadAll,
+      refreshLayout,
+      setStatus,
+      openOnboarding,
+      isLayoutPresetDropdownOpen,
+      closeLayoutPresetDropdown,
+      openLayoutPresetDropdown,
+      isLayoutPresetMenuOpen,
+      closeLayoutPresetMenu,
+      openLayoutPresetMenu,
+      openAboutDialog,
+      openSiteManager,
+      closeAboutDialog,
+      closeSiteManager,
+      closeLayoutPresets,
+      saveLayoutPresetAs,
+      runLayoutPresetMenuAction,
+      closeTargetContextMenu,
+      runTargetContextAction,
+      getTargetContextSiteLabel: () => state.targetContextMenu.siteLabel,
+      resolveCloseConfirm,
+      isTargetContextMenuOpen,
+      isCloseConfirmOpen,
+      isAboutDialogOpen,
+      isSiteManagerOpen,
+      onboarding: onboardingController,
+    },
   });
 
   wireThemeToggle();
@@ -4034,37 +2262,16 @@ async function boot() {
   wireLayoutDragging();
   wireResponsiveRelayout();
   await wireCloseConfirmation();
-
-  await appWindow.onResized(() => {
-    scheduleLayoutRefresh("window-state", [0, 120, 260, 460, 720]);
-    if (isLayoutPresetMenuOpen()) {
-      void positionLayoutPresetMenuWebview();
-    }
-    if (isLayoutPresetDropdownOpen()) {
-      void positionLayoutPresetDropdownWebview();
-    }
-  });
-
-  await appWindow.onScaleChanged(() => {
-    scheduleLayoutRefresh("scale-change", [0, 120, 260, 460, 720]);
-    if (isLayoutPresetMenuOpen()) {
-      void positionLayoutPresetMenuWebview();
-    }
-    if (isLayoutPresetDropdownOpen()) {
-      void positionLayoutPresetDropdownWebview();
-    }
-  });
-
-  await appWindow.onFocusChanged(({ payload: focused }) => {
-    if (focused) {
-      scheduleLayoutRefresh("focus-return", [0, 120, 260]);
-      if (isLayoutPresetMenuOpen()) {
-        void positionLayoutPresetMenuWebview();
-      }
-      if (isLayoutPresetDropdownOpen()) {
-        void positionLayoutPresetDropdownWebview();
-      }
-    }
+  await wireWindowLayoutEvents({
+    appWindow,
+    actions: {
+      scheduleLayoutRefresh,
+      isLayoutPresetMenuOpen,
+      isLayoutPresetDropdownOpen,
+      positionLayoutPresetMenuWebview,
+      positionLayoutPresetDropdownWebview,
+      onError: console.error,
+    },
   });
 
   if (!state.onboarding.completed) {

@@ -15,6 +15,25 @@ const releaseWorkflow = fs.readFileSync(
   "utf8",
 );
 const mainTs = fs.readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const composerAttachmentsTs = fs.readFileSync(
+  new URL("../src/features/composer/attachments.ts", import.meta.url),
+  "utf8",
+);
+const composerDomTs = fs.readFileSync(
+  new URL("../src/features/composer/composer-dom.ts", import.meta.url),
+  "utf8",
+);
+const composerEventsTs = fs.readFileSync(
+  new URL("../src/features/composer/composer-events.ts", import.meta.url),
+  "utf8",
+);
+const appEventsTs = fs.readFileSync(new URL("../src/features/app-events.ts", import.meta.url), "utf8");
+const tauriAppEventsTs = fs.readFileSync(new URL("../src/tauri/app-events.ts", import.meta.url), "utf8");
+const overlayWebviewsTs = fs.readFileSync(new URL("../src/tauri/overlay-webviews.ts", import.meta.url), "utf8");
+const layoutPresetOverlaysTs = fs.readFileSync(
+  new URL("../src/features/layout-presets/layout-preset-overlays.ts", import.meta.url),
+  "utf8",
+);
 const geometryJs = fs.readFileSync(new URL("../src/geometry.js", import.meta.url), "utf8");
 const packageJson = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const viteConfig = fs.readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
@@ -84,15 +103,49 @@ test("layout preset dialog contract exists in HTML and app wiring", () => {
     "async function ensureLayoutPresetMenuWebview()",
     "async function showLayoutPresetMenuWebview()",
     "async function hideLayoutPresetMenuWebview()",
-    "await current.setFocus();",
-    'payload?.action === "close"',
+    "wireTauriAppEvents({",
     "function openLayoutPresetMenu()",
     "async function applyLayoutPreset(presetId)",
     "state.layoutPresets = loadLayoutPresets();",
-    'document.querySelector("#layout-preset-select").addEventListener("click"',
-    'document.querySelector("#layout-preset-more").addEventListener("click"',
+    "wireAppDomEvents({",
   ]) {
     assert.equal(mainTs.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    'document.querySelector("#layout-preset-select").addEventListener("click"',
+    'document.querySelector("#layout-preset-more").addEventListener("click"',
+    "actions.openLayoutPresetDropdown()",
+    "actions.openLayoutPresetMenu()",
+  ]) {
+    assert.equal(appEventsTs.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    'payload?.action === "close"',
+    'tauriEvent.listen("layout-preset-dropdown-action"',
+    'tauriEvent.listen("layout-preset-menu-action"',
+  ]) {
+    assert.equal(tauriAppEventsTs.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    "function createOverlayWebviewController",
+    "await current.show();",
+    "await current.setFocus();",
+    'buildOverlayWebviewOptions(options.route, metrics, options.fallbackSize)',
+  ]) {
+    assert.equal(overlayWebviewsTs.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    "export function createLayoutPresetOverlayController",
+    "await overlays.dropdown.show();",
+    "await overlays.menu.show();",
+    'trigger.setAttribute("aria-expanded", "true")',
+    'trigger?.setAttribute("aria-expanded", "false")',
+  ]) {
+    assert.equal(layoutPresetOverlaysTs.includes(fragment), true, `missing ${fragment}`);
   }
 
   assert.equal(indexHtml.includes("<select"), false, "layout switcher should not use native select");
@@ -136,6 +189,11 @@ test("frontend build uses Vite, TypeScript, and Tailwind", () => {
   assert.equal(tailwindCss.includes('@import "tailwindcss/utilities";'), true);
 });
 
+test("main imports shared workspace paging constants", () => {
+  assert.equal(mainTs.includes("MAX_SITES_PER_PAGE,"), true);
+  assert.equal(mainTs.includes('from "./state/workspace"'), true);
+});
+
 test("close confirm and unavailable target styles exist", () => {
   for (const selector of [
     ".close-confirm-card",
@@ -175,7 +233,7 @@ test("window permissions allow both close request interception and destroy", () 
 test("release workflow publishes version tags", () => {
   assert.equal(releaseWorkflow.includes('tags:'), true);
   assert.equal(releaseWorkflow.includes('- "v*"'), true);
-  assert.equal(releaseWorkflow.includes("tauri-apps/tauri-action@v1"), true);
+  assert.equal(releaseWorkflow.includes("tauri-apps/tauri-action@v0"), true);
 });
 
 test("composer supports pasted and dropped attachments end to end", () => {
@@ -188,8 +246,6 @@ test("composer supports pasted and dropped attachments end to end", () => {
 
   for (const fragment of [
     "function wirePromptAttachments()",
-    "function hasDraggedFiles(dataTransfer)",
-    "function describeDragTransfer(dataTransfer)",
     "async function appendComposerPaths(paths)",
     "function findPanelDropTarget(position)",
     "async function injectAttachmentsIntoPanel(targetLabel, paths)",
@@ -198,18 +254,52 @@ test("composer supports pasted and dropped attachments end to end", () => {
     "async function openAboutDialog()",
     "async function closeAboutDialog()",
     "async function ensureWebviewDropListener(siteLabel, webviewInstance)",
-    'await tauriEvent.listen(ATTACHMENT_DEBUG_EVENT, ({ payload }) => {',
     'invoke("inject_attachments", {',
     'await webviewInstance.onDragDropEvent(async (event) => {',
-    'await appWindow.onDragDropEvent(async (event) => {',
-    'invoke("read_file_bytes", { path })',
-    'promptField.addEventListener("paste"',
-    'console.info("[drag-debug]"',
-    'for (const node of [compactBar, dropzone, promptField])',
+    "wireTauriAppEvents({",
+    'invoke("read_file_bytes",',
+    "pathToComposerAttachment",
     "serializeComposerAttachments()",
     'invoke("broadcast_prompt", { prompt, targets, attachments })',
   ]) {
     assert.equal(mainTs.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    "tauriEvent.listen(attachmentDebugEvent",
+    "appWindow.onDragDropEvent(async (event)",
+    'actions.logAttachmentDebug("backend-event"',
+    'actions.logAttachmentDebug("tauri-drag:event"',
+  ]) {
+    assert.equal(tauriAppEventsTs.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    "export function hasDraggedFiles",
+    "export function describeDragTransfer",
+    "export function collectFilesFromItems",
+    "export async function pathToAttachment",
+    "export function serializeAttachments",
+  ]) {
+    assert.equal(composerAttachmentsTs.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    "export function renderComposerAttachmentList",
+    "prompt-attachment-remove",
+    "dataset.removeAttachment",
+  ]) {
+    assert.equal(composerDomTs.includes(fragment), true, `missing ${fragment}`);
+  }
+
+  for (const fragment of [
+    "export function wirePromptAttachments",
+    'promptField.addEventListener("paste"',
+    'console.info("[drag-debug]"',
+    "createPromptDropTracker",
+    "for (const node of [compactBar, dropzone, promptField])",
+  ]) {
+    assert.equal(composerEventsTs.includes(fragment), true, `missing ${fragment}`);
   }
 
   assert.equal(
