@@ -36,6 +36,7 @@ const layoutPresetOverlaysTs = fs.readFileSync(
 );
 const geometryJs = fs.readFileSync(new URL("../src/geometry.js", import.meta.url), "utf8");
 const packageJson = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const packageLock = JSON.parse(fs.readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
 const viteConfig = fs.readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
 const tsConfig = JSON.parse(fs.readFileSync(new URL("../tsconfig.json", import.meta.url), "utf8"));
 const tailwindCss = fs.readFileSync(new URL("../src/tailwind.css", import.meta.url), "utf8");
@@ -234,6 +235,12 @@ test("release workflow publishes version tags", () => {
   assert.equal(releaseWorkflow.includes('tags:'), true);
   assert.equal(releaseWorkflow.includes('- "v*"'), true);
   assert.equal(releaseWorkflow.includes("tauri-apps/tauri-action@v0"), true);
+});
+
+test("package lock contains emnapi runtime entries required by npm ci", () => {
+  const packages = packageLock.packages || {};
+  assert.equal(Boolean(packages["node_modules/@emnapi/core"]), true);
+  assert.equal(Boolean(packages["node_modules/@emnapi/runtime"]), true);
 });
 
 test("composer supports pasted and dropped attachments end to end", () => {
