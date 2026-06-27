@@ -1,5 +1,13 @@
+// @ts-nocheck
 import Sortable from "./vendor/sortable.esm.js";
 import { handleCloseRequest, hasBlockingOverlay } from "./close-confirm.js";
+import {
+  clamp,
+  clampCardPosition,
+  createRect,
+  cssToPhysicalMetrics,
+  physicalToViewportPosition,
+} from "./geometry.js";
 import {
   applyAvailabilityResults,
   clearSelectionState,
@@ -152,10 +160,6 @@ const state = {
 
 function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
 }
 
 function cloneLayout(layout) {
@@ -418,10 +422,6 @@ function getSiteMeta(label) {
   return state.siteMap.get(label);
 }
 
-function createRect(x, y, width, height) {
-  return { x, y, width, height };
-}
-
 function getGridRect() {
   return document.querySelector(".grid-preview")?.getBoundingClientRect() || null;
 }
@@ -657,10 +657,6 @@ function getTargetRect(selector) {
 function isTargetContextMenuOpen() {
   const shell = document.querySelector("#target-context-menu");
   return Boolean(shell && !shell.hidden);
-}
-
-function clampCardPosition(value, size, viewportSize, padding = getViewportPadding()) {
-  return clamp(value, padding, Math.max(padding, viewportSize - size - padding));
 }
 
 function updateOnboardingFocus(step) {
@@ -1222,17 +1218,6 @@ async function serializeAttachmentsFromPaths(paths) {
     kind: attachment.kind,
     base64: attachment.base64,
   }));
-}
-
-function physicalToViewportPosition(position) {
-  if (!position) {
-    return null;
-  }
-
-  return {
-    x: position.x / window.devicePixelRatio,
-    y: position.y / window.devicePixelRatio,
-  };
 }
 
 function findPanelDropTarget(position) {
@@ -1804,20 +1789,11 @@ function getLayoutPresetDropdownMetrics() {
 }
 
 async function toPhysicalMetrics(metrics) {
-  if (!metrics) {
-    return null;
-  }
-
   const windowSize = await appWindow.innerSize();
-  const scaleX = windowSize.width / window.innerWidth;
-  const scaleY = windowSize.height / window.innerHeight;
-
-  return {
-    x: Math.round(metrics.x * scaleX),
-    y: Math.round(metrics.y * scaleY),
-    width: Math.round(metrics.width * scaleX),
-    height: Math.round(metrics.height * scaleY),
-  };
+  return cssToPhysicalMetrics(metrics, windowSize, {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
 }
 
 async function ensureLayoutPresetDropdownWebview() {

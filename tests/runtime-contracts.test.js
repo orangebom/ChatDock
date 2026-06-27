@@ -14,7 +14,12 @@ const releaseWorkflow = fs.readFileSync(
   new URL("../.github/workflows/release.yml", import.meta.url),
   "utf8",
 );
-const mainJs = fs.readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
+const mainTs = fs.readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const geometryJs = fs.readFileSync(new URL("../src/geometry.js", import.meta.url), "utf8");
+const packageJson = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const viteConfig = fs.readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
+const tsConfig = JSON.parse(fs.readFileSync(new URL("../tsconfig.json", import.meta.url), "utf8"));
+const tailwindCss = fs.readFileSync(new URL("../src/tailwind.css", import.meta.url), "utf8");
 const tauriLib = fs.readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 const layoutDropdownHtml = fs.readFileSync(
   new URL("../src/layout-preset-dropdown.html", import.meta.url),
@@ -87,7 +92,7 @@ test("layout preset dialog contract exists in HTML and app wiring", () => {
     'document.querySelector("#layout-preset-select").addEventListener("click"',
     'document.querySelector("#layout-preset-more").addEventListener("click"',
   ]) {
-    assert.equal(mainJs.includes(fragment), true, `missing ${fragment}`);
+    assert.equal(mainTs.includes(fragment), true, `missing ${fragment}`);
   }
 
   assert.equal(indexHtml.includes("<select"), false, "layout switcher should not use native select");
@@ -97,10 +102,12 @@ test("layout preset dialog contract exists in HTML and app wiring", () => {
     'layout-preset-dropdown-state',
     'layout-preset-dropdown-action',
     'action: "close"',
+    'eventObject.key === "Escape"',
     'data-layout-preset-id',
   ]) {
     assert.equal(layoutDropdownHtml.includes(fragment), true, `missing ${fragment}`);
   }
+  assert.equal(layoutDropdownHtml.includes('addEventListener("blur"'), false);
 
   for (const fragment of [
     'id="layout-preset-menu-list"',
@@ -108,9 +115,25 @@ test("layout preset dialog contract exists in HTML and app wiring", () => {
     'layout-preset-menu-action',
     'data-layout-preset-action',
     'action: "close"',
+    'eventObject.key === "Escape"',
   ]) {
     assert.equal(layoutMenuHtml.includes(fragment), true, `missing ${fragment}`);
   }
+  assert.equal(layoutMenuHtml.includes('addEventListener("blur"'), false);
+});
+
+test("frontend build uses Vite, TypeScript, and Tailwind", () => {
+  assert.equal(indexHtml.includes('src="./main.ts"'), true);
+  assert.equal(indexHtml.includes('href="./tailwind.css"'), true);
+  assert.equal(tauriConfig.build.frontendDist, "../dist");
+  assert.equal(tauriConfig.build.devUrl, "http://127.0.0.1:1420");
+  assert.equal(packageJson.scripts.build, "vite build");
+  assert.equal(packageJson.scripts.typecheck, "tsc --noEmit");
+  assert.equal(viteConfig.includes("@tailwindcss/vite"), true);
+  assert.equal(viteConfig.includes('root: "src"'), true);
+  assert.equal(viteConfig.includes('main: "index.html"'), true);
+  assert.equal(tsConfig.compilerOptions.allowJs, true);
+  assert.equal(tailwindCss.includes('@import "tailwindcss/utilities";'), true);
 });
 
 test("close confirm and unavailable target styles exist", () => {
@@ -170,7 +193,6 @@ test("composer supports pasted and dropped attachments end to end", () => {
     "async function appendComposerPaths(paths)",
     "function findPanelDropTarget(position)",
     "async function injectAttachmentsIntoPanel(targetLabel, paths)",
-    "function physicalToViewportPosition(position)",
     "function logAttachmentDebug(stage, payload = {})",
     "function isAboutDialogOpen()",
     "async function openAboutDialog()",
@@ -187,8 +209,14 @@ test("composer supports pasted and dropped attachments end to end", () => {
     "serializeComposerAttachments()",
     'invoke("broadcast_prompt", { prompt, targets, attachments })',
   ]) {
-    assert.equal(mainJs.includes(fragment), true, `missing ${fragment}`);
+    assert.equal(mainTs.includes(fragment), true, `missing ${fragment}`);
   }
+
+  assert.equal(
+    geometryJs.includes("function physicalToViewportPosition(position"),
+    true,
+    "missing physicalToViewportPosition in geometry module",
+  );
 
   for (const fragment of [
     "struct PromptAttachment",

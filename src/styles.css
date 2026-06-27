@@ -217,10 +217,15 @@ button {
   height: 18px;
   display: grid;
   place-items: center;
-  color: var(--text-dim);
-  font-size: 16px;
-  line-height: 18px;
-  transform: translateY(-1px);
+}
+
+.layout-preset-caret::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--text-dim);
+  border-bottom: 2px solid var(--text-dim);
+  transform: translateY(-2px) rotate(45deg);
 }
 
 .layout-preset-more {

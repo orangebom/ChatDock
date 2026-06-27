@@ -102,12 +102,12 @@
         });
       });
 
-      window.addEventListener("blur", () => {
-        window.setTimeout(() => {
+      window.addEventListener("keydown", (eventObject) => {
+        if (eventObject.key === "Escape") {
           void event.emit("layout-preset-menu-action", {
             action: "close",
           });
-        }, 120);
+        }
       });
 
       await event.listen("layout-preset-menu-state", ({ payload }) => {

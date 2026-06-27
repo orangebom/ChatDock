@@ -4,7 +4,10 @@
   "version": "0.3.0",
   "identifier": "com.orangethink.ai-compare",
   "build": {
-    "frontendDist": "../src"
+    "beforeDevCommand": "npm run dev:web",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../dist"
   },
   "app": {
     "withGlobalTauri": true,
